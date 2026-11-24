@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: ZKIR PARTY QUESTING
+## Notes: Wait together before consequential NPC interactions.
+## Author: ZKIR
+## Version: 1.0
+## SavedVariablesPerCharacter: ZKIRPartyQuestingDB
+Rules.lua
+Core.lua
+Facts.lua
+UI.lua
+WoW.lua
