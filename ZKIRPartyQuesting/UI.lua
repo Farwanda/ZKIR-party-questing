@@ -1,7 +1,8 @@
 local _, NS = ...
 local UI = {}
 NS.UI = UI
-local frame, warning, footer, rows
+local frame, warning, footer, rows, previewFrame
+local observedAttempts = {}
 local colors = {Ready = {0.35, 1, 0.45}, ["Not Ready"] = {1, 0.4, 0.35},
     Waiting = {1, 0.85, 0.35}, Unknown = {0.75, 0.75, 0.75}}
 local reasons = {NO_RESPONSE = "No addon response", WAITING = "Waiting for addon",
@@ -38,25 +39,44 @@ local function button(parent, text, width, callback)
     b:SetScript("OnClick", callback)
     return b
 end
-local function create()
-    if frame then return end
-    frame = CreateFrame("Frame", "ZKIRPartyQuestingWindow", UIParent, "BackdropTemplate")
-    frame:SetSize(470, 338)
-    frame:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
-    frame:SetFrameStrata("DIALOG")
-    frame:SetClampedToScreen(true)
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    frame:SetBackdrop({bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+local function position(window)
+    window:ClearAllPoints()
+    window:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
+end
+local function scale()
+    return NS.Settings and NS.Settings.sizeScale() or 1
+end
+local function createWindow(name)
+    local window = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
+    window:SetSize(470, 338)
+    position(window)
+    window:SetScale(scale())
+    window:SetFrameStrata("DIALOG")
+    window:SetClampedToScreen(true)
+    window:SetMovable(true)
+    window:EnableMouse(true)
+    window:RegisterForDrag("LeftButton")
+    window:SetScript("OnDragStart", window.StartMoving)
+    window:SetScript("OnDragStop", window.StopMovingOrSizing)
+    window:SetBackdrop({bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 16,
         insets = {left = 4, right = 4, top = 4, bottom = 4}})
-    frame:SetBackdropColor(0.05, 0.05, 0.07, 0.97)
+    window:SetBackdropColor(0.05, 0.05, 0.07, 0.97)
+    return window
+end
+local function attemptID(active)
+    -- Concurrent detections converge on a different key but share these fields.
+    -- A deliberate retry has the previous key as its parent and is a new warning.
+    return table.concat({active.parent or "0", active.ruleID or "", active.context or ""}, "\031")
+end
+local function create()
+    if frame then return end
+    frame = createWindow("ZKIRPartyQuestingWindow")
     label(frame, 14, -14, 400):SetText("|cffffd160ZKIR PARTY QUESTING|r")
     local close = button(frame, "X", 22, function()
-        UI.hiddenKey = UI.engine.active.key
+        local active = UI.engine and UI.engine.active
+        UI.hiddenKey = active and active.key
+        UI.hiddenAttempt = active and attemptID(active)
         frame:Hide()
     end)
     close:SetPoint("TOPRIGHT", -9, -9)
@@ -88,11 +108,16 @@ local function create()
     footer = label(frame, 14, -271, 442)
     footer:SetHeight(52)
 end
-function UI.update(engine)
+function UI.update(engine, presentationOnly)
     UI.engine = engine
-    if not engine.active then if frame then frame:Hide() end; return end
+    local options = NS.Settings and NS.Settings.values or {}
+    UI.lastSolo = options.solo ~= false
+    if not engine or not engine.active then if frame then frame:Hide() end; return end
     create()
     local a, data = engine.active, engine:rows()
+    local attempt = attemptID(a)
+    local firstObservation = not observedAttempts[attempt]
+    observedAttempts[attempt] = true
     local rule = NS.Rules[a.ruleID]
     warning:SetText(rule.warning)
     for i, row in ipairs(rows) do
@@ -114,9 +139,66 @@ function UI.update(engine)
     elseif engine:allReady() then footer:SetText("|cff59ff73You may proceed.|r " .. rule.nextAction)
     else footer:SetText("Wait for everyone. Leader confirmation token: " .. engine:fingerprint() ..
         ". Ready checks preparation, not guaranteed credit.") end
-    if UI.hiddenKey ~= a.key then frame:Show() end
+    local soloHidden = engine.count == 1 and options.solo == false and UI.forcedAttempt ~= attempt
+    local becomingVisible = firstObservation or UI.soloSuppressedAttempt == attempt
+    UI.soloSuppressedAttempt = soloHidden and attempt or nil
+    if UI.hiddenKey == a.key or UI.hiddenAttempt == attempt or soloHidden then
+        frame:Hide()
+    else
+        if becomingVisible and previewFrame then previewFrame:Hide() end
+        frame:Show()
+        if becomingVisible then frame:Raise() end
+        if firstObservation and not presentationOnly and not engine.restoring and not a.started and
+            options.sound ~= false and NS.PlayWarningSound then
+            NS.PlayWarningSound()
+        end
+    end
 end
 function UI.show(engine)
-    UI.hiddenKey = nil
-    UI.update(engine)
+    UI.hiddenKey, UI.hiddenAttempt = nil, nil
+    UI.forcedAttempt = engine and engine.active and attemptID(engine.active)
+    if previewFrame then previewFrame:Hide() end
+    UI.update(engine, true)
+    if frame and engine and engine.active then frame:Raise() end
+end
+function UI.applySettings()
+    if NS.Settings and NS.Settings.values.solo == false and UI.lastSolo == true then
+        UI.forcedAttempt = nil
+    end
+    if frame then frame:SetScale(scale()) end
+    if previewFrame then previewFrame:SetScale(scale()) end
+    UI.update(UI.engine, true)
+end
+function UI.resetPosition()
+    if frame then position(frame) end
+    if previewFrame then position(previewFrame) end
+    if NS.Settings then NS.Settings.resetPosition() end
+end
+function UI.preview()
+    if not previewFrame then
+        previewFrame = createWindow("ZKIRPartyQuestingPreviewWindow")
+        label(previewFrame, 14, -14, 400):SetText("|cffffd160ZKIR PARTY QUESTING - LOCAL PREVIEW|r")
+        local close = button(previewFrame, "X", 22, function() previewFrame:Hide() end)
+        close:SetPoint("TOPRIGHT", -9, -9)
+        local sampleWarning = label(previewFrame, 14, -40, 442)
+        sampleWarning:SetHeight(54)
+        sampleWarning:SetText("Sample escort: wait for everyone before accepting. One acceptance starts the escort; finish prerequisite hand-ins first.")
+        local samples = {
+            {"Aria", "Ready", "automatic"}, {"Borin", "Not Ready", "automatic"},
+            {"Cora", "Waiting", "unverified"}, {"Dain", "Unknown", "unverified"},
+            {"Elya", "Ready", "leader confirmed"},
+        }
+        for i, sample in ipairs(samples) do
+            local text = label(previewFrame, 14, -100 - (i - 1) * 33, 442)
+            text:SetHeight(31)
+            text:SetText(sample[1] .. " (sample)\n" .. sample[2] .. " (" .. sample[3] .. ")")
+            text:SetTextColor(unpack(colors[sample[2]]))
+        end
+        local note = label(previewFrame, 14, -271, 442)
+        note:SetHeight(52)
+        note:SetText("Preview only: sample players and statuses. No party messages are sent and real readiness is unchanged.")
+    end
+    previewFrame:SetScale(scale())
+    previewFrame:Show()
+    previewFrame:Raise()
 end

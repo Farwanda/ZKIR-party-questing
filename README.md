@@ -10,6 +10,10 @@ Disable other addons' automatic quest acceptance, turn-in, and dialogue selectio
 
 ## Normal use
 
+Type **`/zkir`** to open settings at any time. The window shows the loaded version and current status, including detected startup or messaging problems. **Preview warning** displays sample party rows locally, without sending chat or changing real readiness. **Reset window position** restores the settings, warning, and preview windows.
+
+Three settings are saved per character: **Warning sound** (on), **Show solo warnings** (on), and **Window size** (Small / Normal / Large; Normal by default). Sound plays once for a new displayed attempt. Disabling solo warnings affects automatic solo presentation; party coordination remains automatic. Preview and reopening a warning are silent.
+
 Open a supported quest or NPC conversation and **wait**. Every responding addon opens the window. All current party members appear, including nonresponders. Discovery takes about five seconds, followed by announcement acknowledgement; the local warning appears immediately.
 
 Hover a row for its specific blocker or missing evidence.
@@ -23,7 +27,7 @@ The leader's addon announces; otherwise the alphabetically first responding full
 
 When everyone is ready, the UI says **You may proceed** and the elected sender announces the specific next action once. There is no announcement or proceed button. Solo play shows local warnings without PARTY traffic.
 
-`/zkir` reopens the window. `/zkir retry` starts a **new attempt**, clearing confirmations; use it after coordinating a real retry, a later Pusillin conversation, a changed Rocknot hand-in plan, or restoring failed communication. The addon does not identify those later stages automatically, and retry cannot reset an NPC. `/zkir status` displays local status. No automatic quest sharing or acceptance is performed.
+`/zkir show` reopens the current warning, including a hidden solo warning, or opens settings if no interaction is active. `/zkir retry` starts a **new attempt**, clearing confirmations; use it after coordinating a real retry, a later Pusillin conversation, a changed Rocknot hand-in plan, or restoring failed communication. The addon does not identify those later stages automatically, and retry cannot reset an NPC. `/zkir status` prints the current local status. No automatic quest sharing or acceptance is performed.
 
 ## Coverage and verification
 
@@ -33,6 +37,6 @@ Version 1.0 covers **77 acceptance warnings, 19 dialogue warnings, and 6 turn-in
 
 This is a broad curated catalogue, **not a guarantee that every Forever escort or dungeon event is covered**. Cages, braziers, consoles, item use, combat/proximity triggers, some later escort stages, raid coordination, and insufficiently identified scripts remain gaps. For example, Alcaz's earlier Questioner kill-order hazard is not covered by Mason's hand-in warning. The addon cannot pause an NPC's schedule or prevent resets.
 
-**Simulated verification only:** 26 protocol scenario groups (including all 102 rules in mixed parties), 22 mocked API/UI groups, 217 catalogue preparation/message checks, 163 dungeon checks, and 20 preparation cases passed using Lua 5.1. No live client was available. See the [multiplayer field checks](docs/MULTIPLAYER_CHECKLIST.md) and [protocol limits](docs/PROTOCOL.md). The dungeon audit extends and corrects the earlier catalogue; other research files are historical material.
+**Simulated verification only:** 26 protocol scenario groups (including all 102 rules in mixed parties), 22 mocked API/UI groups, 14 settings scenarios (136 checks), 217 catalogue preparation/message checks, 163 dungeon checks, and 20 preparation cases passed using Lua 5.1. No live client was available. See the [multiplayer field checks](docs/MULTIPLAYER_CHECKLIST.md) and [protocol limits](docs/PROTOCOL.md). The dungeon audit extends and corrects the earlier catalogue; other research files are historical material.
 
 Run tests with Lua 5.1 via `python3 -m pip install lupa==2.8`, then `python3 tests/run.py`. Build the deterministic install ZIP with `python3 tools/build.py`.

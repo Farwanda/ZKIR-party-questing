@@ -1,6 +1,8 @@
 # Coordination and delivery boundaries
 
-The pure state machine is in `Core.lua`; `Facts.lua` evaluates only action-relevant snapshots. `WoW.lua` owns API reads/events and guarded communication. `Rules.lua` is the entire runtime catalogue. `UI.lua` owns one compact, draggable window with at most five rows.
+The pure state machine is in `Core.lua`; `Facts.lua` evaluates only action-relevant snapshots. `WoW.lua` owns API reads/events and guarded communication. `Rules.lua` is the entire runtime catalogue. `UI.lua` owns the compact warning window and a separate local preview. `Settings.lua` owns the settings window and validates saved per-character sound, solo-presentation, and size choices.
+
+Settings and preview do not create events, publish facts, send messages, confirm readiness, or replace the real engine. Suppressing solo presentation does not suspend the protocol when joining a party. Solo attempts do not consume PARTY announcement slots, so a subsequently formed group can still receive its initial warning. `/zkir` always opens settings; `/zkir show` explicitly reopens a real warning. Sound is guarded and deduplicated across repeated updates and concurrent detections; preview, manual reopening, and restored attempts are silent. The Loaded indicator confirms addon code is running, not message delivery or live server behavior.
 
 Packets use the versioned `ZKIRPQ1` prefix, only PARTY, at most 255 bytes, and roster-resolved full player identities. No incoming text is executed. Unknown versions, outsiders, ambiguous short names, malformed event envelopes, old attempts, retired boots, and older fact sequence numbers are ignored. Party addon messages are cooperation between peers, not an authenticated security boundary against a deliberately malicious party addon.
 

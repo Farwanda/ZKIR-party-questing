@@ -32,6 +32,35 @@ local function locked()
     if type(InChatMessagingLockdown) == "function" then return call(InChatMessagingLockdown) ~= false end
     return false
 end
+function NS.PlayWarningSound()
+    if not NS.Settings.values.sound then return end
+    local kit = SOUNDKIT and SOUNDKIT.RAID_WARNING
+    if not public(kit) or type(kit) ~= "number" then return end
+    if C_Sound and type(C_Sound.PlaySound) == "function" then
+        call(C_Sound.PlaySound, kit)
+    else
+        call(PlaySound, kit, "Master")
+    end
+end
+local function status()
+    if not engine then return "Loaded, but player identity is unavailable. Try again after entering the world." end
+    if call(IsInRaid) == true then return "Raids are not supported. Use a party of 2–5." end
+    if not registered or type(C_ChatInfo and C_ChatInfo.SendAddonMessage) ~= "function" then
+        return "Party messaging is unavailable. Local warnings still work."
+    end
+    if type(C_ChatInfo and C_ChatInfo.SendChatMessage or SendChatMessage) ~= "function" then
+        return "Party chat is unavailable. Local warnings still work."
+    end
+    if locked() then return "Party messaging is restricted. Wait before starting." end
+    if engine.notice then return engine.notice end
+    if not engine.healthy then return "Party synchronization is unavailable. Wait before starting." end
+    if engine.active then
+        local title = NS.Rules[engine.active.ruleID].title
+        return (engine.active.started and "Action observed: " or "Coordinating: ") .. title
+    end
+    return "Waiting for a supported interaction." ..
+        (engine.count == 1 and not NS.Settings.values.solo and "\nSolo warnings are off; party warnings remain automatic." or "")
+end
 local function send(payload)
     if not registered or not party() or locked() then return false end
     local result = call(C_ChatInfo and C_ChatInfo.SendAddonMessage, PREFIX, payload, "PARTY")
@@ -105,24 +134,29 @@ local function detect(kind, questID)
             (kind ~= "gossip" and rule.questID == questID)) then
             engine:detect(id, guid or "unknown")
             evaluate()
-            NS.UI.show(engine)
             return
         end
     end
 end
 local function start()
     if engine then return end
-    local me = fullName("player")
-    if not me then return end
     ZKIRPartyQuestingDB = type(ZKIRPartyQuestingDB) == "table" and ZKIRPartyQuestingDB or {}
     local db = ZKIRPartyQuestingDB
+    local version = call(C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata, ADDON, "Version")
+    NS.Settings.init(db, {status = status, version = type(version) == "string" and version or "unknown",
+        changed = function() NS.UI.applySettings() end})
+    local me = fullName("player")
+    if not me then return end
     db.boot = (tonumber(db.boot) or 0) + 1
     db.engine = type(db.engine) == "table" and db.engine or {}
     local result = call(C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix, PREFIX)
     local enum = Enum and Enum.RegisterAddonMessagePrefixResult or {}
     registered = result == true or result == (enum.Success or 0) or result == (enum.DuplicatePrefix or 1)
     engine = NS.New({me = me, now = now, wall = wall, boot = tostring(wall()) .. "." .. db.boot,
-        saved = db.engine, send = send, chat = chat, changed = NS.UI.update})
+        saved = db.engine, send = send, chat = chat, changed = function(current)
+            NS.UI.update(current)
+            NS.Settings.refresh()
+        end})
     NS.engine = engine
     roster()
     evaluate()
@@ -201,6 +235,7 @@ driver:SetScript("OnUpdate", function(_, delta)
     if elapsed < 0.5 then return end
     elapsed = 0
     if engine then evaluate(); engine:tick() end
+    NS.Settings.refresh()
 end)
 -- Observation only, after the ordinary control runs. No guessed gossip option IDs.
 if type(hooksecurefunc) == "function" and C_GossipInfo and type(C_GossipInfo.SelectOption) == "function" then
@@ -214,11 +249,15 @@ end
 SLASH_ZKIRPARTYQUESTING1 = "/zkir"
 SlashCmdList.ZKIRPARTYQUESTING = function(command)
     start()
-    if not engine then return end
     command = (command or ""):lower():match("^%s*(.-)%s*$")
-    if command == "retry" then engine:retry(); evaluate(); NS.UI.show(engine)
-    elseif command == "" or command == "show" then NS.UI.show(engine)
+    if command == "" or command == "settings" or not engine then NS.Settings.show()
+    elseif command == "retry" then
+        engine:retry(); evaluate()
+        if engine.active then NS.UI.show(engine) else NS.Settings.show() end
+    elseif command == "show" then
+        if engine.active then NS.UI.show(engine) else NS.Settings.show() end
     elseif DEFAULT_CHAT_FRAME then
-        DEFAULT_CHAT_FRAME:AddMessage("ZKIR: " .. (engine.notice or "Commands: /zkir show, /zkir retry (new attempt), /zkir status"))
+        DEFAULT_CHAT_FRAME:AddMessage("ZKIR: " .. (command == "status" and status() or
+            "Commands: /zkir (settings), /zkir show, /zkir retry (new attempt), /zkir status"))
     end
 end

@@ -382,7 +382,8 @@ end
 
 function Core:announce(stage)
     local a, now = self.active, self.cfg.now()
-    if not a or self:owner() ~= self.me or not self.healthy or now - self.stableAt < DISCOVERY or
+    -- Solo presentation must not consume a PARTY announcement slot before a group forms.
+    if not a or (self.count or 0) < 2 or self:owner() ~= self.me or not self.healthy or now - self.stableAt < DISCOVERY or
         now - self.openedAt < DISCOVERY then return end
     local slot = a.key .. stage
     if self.saved.ledger[slot] then return end
