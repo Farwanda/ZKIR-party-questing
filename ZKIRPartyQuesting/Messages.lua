@@ -4,7 +4,7 @@ local _, NS = ...
 local Messages = {}
 NS.Messages = Messages
 
-local actions = {accept = "accept", turnin = "turn in", gossip = "start"}
+local actions = {accept = "ACCEPT NEXT QUEST", turnin = "TURN IN QUEST", gossip = "START EVENT"}
 local reasons = {
     NO_RESPONSE = "No reply. Leader: check.", WAITING = "Waiting...",
     CONNECTION_UNKNOWN = "Connection unknown.", OFFLINE = "Offline.",
@@ -23,7 +23,7 @@ local function questName(id, rule, resolver)
 end
 
 function Messages.instruction(rule)
-    return "WAIT. DON'T " .. string.upper(actions[rule.kind] or "start") .. " YET."
+    return "WAIT. DON'T " .. (actions[rule.kind] or actions.gossip) .. " YET. WAIT FOR OTHERS"
 end
 
 function Messages.consequence(rule)
@@ -61,8 +61,7 @@ function Messages.reason(code, rule, resolver)
 end
 
 function Messages.chatWarning(rule)
-    return "WAIT for everyone. Don't " .. (actions[rule.kind] or "start") .. " " .. rule.title ..
-        " yet. " .. Messages.consequence(rule)
+    return Messages.instruction(rule) .. ". " .. rule.title .. ". " .. Messages.consequence(rule)
 end
 
 function Messages.chatNext(rule)

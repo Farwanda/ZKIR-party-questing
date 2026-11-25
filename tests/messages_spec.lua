@@ -15,9 +15,9 @@ local count = 0
 for _, rule in pairs(rules) do
     count = count + 1
     local _, words = M.instruction(rule):gsub("%S+", "")
-    check(words >= 3 and words <= 6, rule.id .. " main instruction fits one glance")
+    check(words >= 3 and words <= 9, rule.id .. " main instruction stays short")
     check(#M.consequence(rule) <= 65, rule.id .. " consequence stays short")
-    contains(M.chatWarning(rule), "WAIT for everyone", rule.id .. " asks the party to wait")
+    contains(M.chatWarning(rule), "WAIT FOR OTHERS", rule.id .. " asks the party to wait")
     contains(M.chatWarning(rule), rule.title, rule.id .. " chat identifies its event")
     contains(M.chatNext(rule), rule.title, rule.id .. " next chat identifies its event")
     contains(M.chatNext(rule), "ALL READY", rule.id .. " next chat signals readiness")
@@ -32,9 +32,12 @@ for _, rule in pairs(rules) do
     end
 end
 check(count == 102, "all existing interactions retain copy")
-check(M.instruction(rules.a7046) == "WAIT. DON'T ACCEPT YET.", "acceptance warning is direct")
-check(M.instruction(rules.t5525) == "WAIT. DON'T TURN IN YET.", "reward warning names the right action")
-check(M.instruction(rules.n9039) == "WAIT. DON'T START YET.", "dialogue warning names the right action")
+check(M.instruction(rules.a7046) == "WAIT. DON'T ACCEPT NEXT QUEST YET. WAIT FOR OTHERS",
+    "acceptance warning names the next quest and tells players to wait for others")
+check(M.instruction(rules.t5525) == "WAIT. DON'T TURN IN QUEST YET. WAIT FOR OTHERS",
+    "reward warning names the right action and tells players to wait for others")
+check(M.instruction(rules.n9039) == "WAIT. DON'T START EVENT YET. WAIT FOR OTHERS",
+    "dialogue warning names the right action and tells players to wait for others")
 check(M.reason("PREREQUISITE_7044", rules.a7046) == "Turn in Legends of Maraudon.",
     "Celebras blocker uses its prerequisite title")
 check(M.reason("HAND_IN_7044", rules.a7046) == "Turn in Legends of Maraudon.",
