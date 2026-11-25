@@ -1,4 +1,5 @@
 local NS = {}
+assert(loadfile("ZKIRPartyQuesting/Messages.lua"))("ZKIR", NS)
 assert(loadfile("ZKIRPartyQuesting/Rules.lua"))("ZKIR", NS)
 assert(loadfile("ZKIRPartyQuesting/Core.lua"))("ZKIR", NS)
 assert(loadfile("ZKIRPartyQuesting/Facts.lua"))("ZKIR", NS)

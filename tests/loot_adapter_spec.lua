@@ -80,4 +80,24 @@ test("leadership transfer events revoke ownership even when leadership returns b
     expect(#c.messages == 0, "leadership recovery stays local")
 end)
 
+test("nested loot and roster events render coordination once per update", function()
+    local c, state, calls, toggle = fixture()
+    local setter = c.env.C_PartyInfo.SetLootMethod
+    c.env.C_PartyInfo.SetLootMethod = function(...)
+        local accepted = setter(...) -- Emits PARTY_LOOT_METHOD_CHANGED inside the update.
+        c.event("GROUP_ROSTER_UPDATE") -- The live probe also observed this after loot changes.
+        return accepted
+    end
+    c.event("QUEST_DETAIL"); toggle(true); c.advance(2)
+    expect(#calls == 0, "fixture reaches the stable-party delay before applying loot")
+    local updates, render = 0, c.ns.UI.update
+    c.ns.UI.update = function(...) updates = updates + 1; return render(...) end
+    c.advance(0.5)
+    expect(#calls == 1 and state.method == 0, "real loot runtime emitted nested events while applying FFA")
+    expect(updates == 1, "nested event handlers must defer rendering to the outer update")
+    c.advance(0.5)
+    expect(c.env.ZKIRPartyQuestingDB.autoLoot.hold == "owned" and not c.ns.engine.active.started,
+        "batching preserves loot readback and the unrelated unresolved quest")
+end)
+
 print("Loot adapter simulations passed: " .. passed .. " scenarios, " .. checks .. " checks.")

@@ -105,7 +105,7 @@ function Core:send(...)
     local ok, sent = pcall(self.cfg.send, payload)
     if not ok or sent ~= true then
         self.healthy = false
-        self.notice = "Party synchronization unavailable. Wait; readiness is suspended."
+        self.notice = "WAIT. Party sync failed."
         self:invalidate()
         return false
     end
@@ -275,8 +275,8 @@ function Core:chatHelp(sender)
     if sender ~= self.leader or not self.active or self:owner() ~= self.me or not self.healthy or
         self.cfg.now() - (self.lastHelp or -100) < 10 then return end
     self.lastHelp = self.cfg.now()
-    pcall(self.cfg.chat, "ZKIR leader confirmation: /p ZKIR " .. self:fingerprint() ..
-        " ready Name-Realm (or notready). Check hand-ins, the current action, and attendance first.")
+    pcall(self.cfg.chat, "ZKIR leader: check the player, then /p ZKIR " .. self:fingerprint() ..
+        " ready Name-Realm (or notready).")
 end
 
 function Core:owner()
@@ -295,7 +295,7 @@ end
 
 function Core:action(questID, kind)
     local a = self.active
-    if not a then return end
+    if not a or a.started then return end
     local rule = NS.Rules[a.ruleID]
     if rule.questID == questID and rule.kind == kind then
         a.started = true
@@ -406,7 +406,7 @@ function Core:announce(stage)
     end
     if self.count > 1 then
         local ok, sent = pcall(self.cfg.chat, "ZKIR: " .. message)
-        if not ok or not sent then self.notice = "Party chat unavailable; use the warning window and coordinate in chat." end
+        if not ok or not sent then self.notice = "WAIT. Party chat failed. Check with the party." end
     end
     self.pending = nil
 end
@@ -419,7 +419,7 @@ function Core:tick()
             p.expired = true
             self:invalidate()
             self.healthy = false
-            self.notice = "An addon stopped responding. Wait and retry after communication recovers."
+            self.notice = "WAIT. An addon stopped responding. Reconnect, then /zkir retry."
         end
     end
     if now - self.lastPulse >= PULSE then
@@ -442,8 +442,4 @@ function Core:tick()
         end
     end
     self:changed()
-end
-
-function Core:close()
-    -- Closing is purely visual; it cannot approve, cancel, or restart an action.
 end

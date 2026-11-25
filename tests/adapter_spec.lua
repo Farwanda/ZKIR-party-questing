@@ -79,7 +79,8 @@ end)
 test("group invitation uses third argument / no automatic acceptance", function()
     local c = client(); c.event("QUEST_DETAIL")
     c.event("QUEST_ACCEPT_CONFIRM", "Bob", "Untrusted title", 7046)
-    assert(c.ns.engine.active.started and c.ns.engine.notice:find("invitation"))
+    assert(c.ns.engine.active.started and c.ns.engine.notice:find("invite", 1, true) and
+        c.ns.engine.notice:find("game prompt", 1, true), "shared quest uses the normal game invite")
 end)
 test("expanded acceptance catalogue opens before any action", function()
     local catalogue = client().ns.Rules

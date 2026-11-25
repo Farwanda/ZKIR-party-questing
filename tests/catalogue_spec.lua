@@ -1,4 +1,5 @@
 local NS = {}
+assert(loadfile("ZKIRPartyQuesting/Messages.lua"))("ZKIR", NS)
 assert(loadfile("ZKIRPartyQuesting/Rules.lua"))("ZKIR", NS)
 assert(loadfile("ZKIRPartyQuesting/Facts.lua"))("ZKIR", NS)
 local function prepared(rule)
@@ -46,7 +47,7 @@ for key, rule in pairs(NS.Rules) do
         check(rule, s, "U")
     end
     if rule.kind == "accept" and not rule.partyAccept then
-        assert(not rule.nextAction:find("others join when offered", 1, true), key)
+        assert(not rule.nextAction:find("accept if invited", 1, true), key)
     end
 end
 -- Corrections that cannot be recovered by scanning quest titles alone.

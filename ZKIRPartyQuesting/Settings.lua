@@ -6,22 +6,12 @@ local scales = {Small = 0.85, Normal = 1, Large = 1.15}
 local callbacks, frame, heading, status, sound, solo = {}, nil
 local sizeButtons = {}
 local ffaFriends, ffaCharacters, lootStatus, charactersFrame, characterText, characterError
+local lastPresentation
 
-local function label(parent, x, y, width)
-    local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    text:SetPoint("TOPLEFT", x, y)
-    text:SetWidth(width)
-    text:SetJustifyH("LEFT")
-    text:SetJustifyV("TOP")
-    return text
-end
+local label = NS.Widgets.label
 
 local function button(text, width, onClick, parent)
-    local control = CreateFrame("Button", nil, parent or frame, "UIPanelButtonTemplate")
-    control:SetSize(width, 22)
-    control:SetText(text)
-    control:SetScript("OnClick", onClick)
-    return control
+    return NS.Widgets.button(parent or frame, text, width, onClick)
 end
 
 local function changed()
@@ -57,20 +47,8 @@ end
 
 local function showCharacters()
     if not charactersFrame then
-        charactersFrame = CreateFrame("Frame", "ZKIRPartyQuestingCharactersWindow", UIParent, "BackdropTemplate")
-        charactersFrame:SetSize(420, 330)
+        charactersFrame = NS.Widgets.window("ZKIRPartyQuestingCharactersWindow", 420, 330)
         charactersFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-        charactersFrame:SetFrameStrata("DIALOG")
-        charactersFrame:SetClampedToScreen(true)
-        charactersFrame:SetMovable(true)
-        charactersFrame:EnableMouse(true)
-        charactersFrame:RegisterForDrag("LeftButton")
-        charactersFrame:SetScript("OnDragStart", charactersFrame.StartMoving)
-        charactersFrame:SetScript("OnDragStop", charactersFrame.StopMovingOrSizing)
-        charactersFrame:SetBackdrop({bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 16,
-            insets = {left = 4, right = 4, top = 4, bottom = 4}})
-        charactersFrame:SetBackdropColor(0.05, 0.05, 0.07, 0.97)
         label(charactersFrame, 14, -14, 350):SetText("|cffffd160AUTO FFA - CHARACTERS|r")
         local close = button("X", 22, function() charactersFrame:Hide() end, charactersFrame)
         close:SetPoint("TOPRIGHT", -9, -9)
@@ -142,20 +120,8 @@ end
 
 local function create()
     if frame then return end
-    frame = CreateFrame("Frame", "ZKIRPartyQuestingSettingsWindow", UIParent, "BackdropTemplate")
-    frame:SetSize(360, 458)
+    frame = NS.Widgets.window("ZKIRPartyQuestingSettingsWindow", 360, 458)
     Settings.resetPosition()
-    frame:SetFrameStrata("DIALOG")
-    frame:SetClampedToScreen(true)
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    frame:SetBackdrop({bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 16,
-        insets = {left = 4, right = 4, top = 4, bottom = 4}})
-    frame:SetBackdropColor(0.05, 0.05, 0.07, 0.97)
     heading = label(frame, 14, -14, 307)
     heading:SetHeight(30)
     local close = button("X", 22, function() frame:Hide() end)
@@ -207,20 +173,14 @@ function Settings.init(db, options)
     Settings.refresh()
 end
 
-function Settings.refresh()
-    if not frame then return end
+function Settings.refresh(force)
+    if not frame or not force and not frame:IsShown() then return end
     local version = type(callbacks.version) == "string" and callbacks.version or "unknown"
-    heading:SetText("|cffffd160ZKIR PARTY QUESTING|r\nv" .. version .. " - |cff59ff73Loaded|r")
     local message = "Waiting for a supported interaction."
     if type(callbacks.status) == "function" then
         local ok, value = pcall(callbacks.status)
         message = ok and type(value) == "string" and value or "Status unavailable."
     end
-    status:SetText(message)
-    sound:SetChecked(Settings.values.sound)
-    solo:SetChecked(Settings.values.solo)
-    ffaFriends:SetChecked(Settings.values.ffaFriends)
-    ffaCharacters:SetChecked(Settings.values.ffaCharacters)
     local lootMessage = "Auto FFA is off."
     if NS.AutoLoot and type(NS.AutoLoot.status) == "function" then
         local ok, value = pcall(NS.AutoLoot.status)
@@ -228,6 +188,17 @@ function Settings.refresh()
     elseif Settings.values.ffaFriends or Settings.values.ffaCharacters then
         lootMessage = "Auto FFA is unavailable."
     end
+    local values = Settings.values
+    local signature = table.concat({version, message, lootMessage, tostring(values.sound), tostring(values.solo),
+        values.size, tostring(values.ffaFriends), tostring(values.ffaCharacters)}, "\031")
+    if not force and signature == lastPresentation then return end
+    lastPresentation = signature
+    heading:SetText("|cffffd160ZKIR PARTY QUESTING|r\nv" .. version .. " - |cff59ff73Loaded|r")
+    status:SetText(message)
+    sound:SetChecked(values.sound)
+    solo:SetChecked(values.solo)
+    ffaFriends:SetChecked(values.ffaFriends)
+    ffaCharacters:SetChecked(values.ffaCharacters)
     lootStatus:SetText(lootMessage)
     for size, control in pairs(sizeButtons) do
         control:SetText(size == Settings.values.size and ("|cffffd160" .. size .. "|r") or size)
@@ -238,7 +209,7 @@ end
 
 function Settings.show()
     create()
-    Settings.refresh()
     frame:Show()
+    Settings.refresh(true)
     frame:Raise()
 end

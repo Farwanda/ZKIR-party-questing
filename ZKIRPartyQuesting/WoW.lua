@@ -1,23 +1,20 @@
 local ADDON, NS = ...
 local PREFIX = "ZKIRPQ1"
 local engine, registered, elapsed = nil, false, 0
+local batchDepth, renderPending = 0, false
+local questDialog, gossipDialog
+local hookedFrames = {}
 
-local function public(value)
-    return not (type(issecretvalue) == "function" and issecretvalue(value))
-end
-local function pack(...) return {n = select("#", ...), ...} end
-local function call(fn, ...)
-    if type(fn) ~= "function" then return nil end
-    local values = pack(pcall(fn, ...))
-    if not values[1] then return nil end
-    for i = 2, values.n do if not public(values[i]) then return nil end end
-    return unpack(values, 2, values.n)
-end
+local public, call = NS.API.public, NS.API.read
 local function boolean(value)
     if public(value) and type(value) == "boolean" then return value end
 end
 local function now() return call(GetTime) or 0 end
 local function wall() return call(GetServerTime) or call(time) or 0 end
+function NS.QuestTitle(id)
+    local title = call(C_QuestLog and C_QuestLog.GetTitleForQuestID, id)
+    if type(title) == "string" and title ~= "" then return title end
+end
 local function fullName(unit)
     local name, realm = call(UnitFullName, unit)
     if type(name) ~= "string" or name == "" then return nil end
@@ -124,6 +121,43 @@ local function npc()
     if kind ~= "Creature" and kind ~= "Vehicle" then return nil, nil end
     return guid, tonumber(id)
 end
+local function refreshAnchor()
+    -- Native panels may appear after our event handler, or be loaded later.
+    for _, panel in pairs({quest = QuestFrame, gossip = GossipFrame}) do
+        if not hookedFrames[panel] and type(panel.HookScript) == "function" then
+            hookedFrames[panel] = true
+            panel:HookScript("OnShow", refreshAnchor)
+            panel:HookScript("OnHide", function()
+                if panel == GossipFrame and gossipDialog then gossipDialog.closedAt = now() end
+                refreshAnchor()
+            end)
+        end
+    end
+    local active, anchor = engine and engine.active
+    if active then
+        local rule = NS.Rules[active.ruleID]
+        local guid = npc()
+        if questDialog and questDialog.guid == active.context and guid == questDialog.guid and
+            rule.kind ~= "gossip" and questDialog.questID == rule.questID and
+            QuestFrame and call(QuestFrame.IsShown, QuestFrame) == true then
+            anchor = QuestFrame
+        elseif gossipDialog and gossipDialog.guid == active.context and guid == gossipDialog.guid and
+            GossipFrame and call(GossipFrame.IsShown, GossipFrame) == true and
+            (rule.kind == "gossip" and rule.npcID == gossipDialog.npcID or
+             rule.kind == "accept" and gossipDialog.offers[rule.questID]) then
+            anchor = GossipFrame
+        end
+    end
+    NS.UI.setAnchor(anchor)
+end
+local function present()
+    refreshAnchor()
+    if renderPending then
+        renderPending = false
+        NS.UI.update(engine)
+    end
+    NS.Settings.refresh()
+end
 local function detect(kind, questID)
     if not engine then return end
     local guid, npcID = npc()
@@ -154,9 +188,9 @@ local function start()
     local enum = Enum and Enum.RegisterAddonMessagePrefixResult or {}
     registered = result == true or result == (enum.Success or 0) or result == (enum.DuplicatePrefix or 1)
     engine = NS.New({me = me, now = now, wall = wall, boot = tostring(wall()) .. "." .. db.boot,
-        saved = db.engine, send = send, chat = chat, changed = function(current)
-            NS.UI.update(current)
-            NS.Settings.refresh()
+        saved = db.engine, send = send, chat = chat, changed = function()
+            renderPending = true
+            if batchDepth == 0 then present() end
         end})
     NS.engine = engine
     roster()
@@ -180,10 +214,11 @@ for _, event in ipairs({"PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "GROUP_ROSTER_U
     "PARTY_LEADER_CHANGED", "QUEST_DETAIL", "QUEST_PROGRESS", "QUEST_COMPLETE", "QUEST_LOG_UPDATE",
     "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_ACCEPT_CONFIRM", "GOSSIP_SHOW", "CHAT_MSG_ADDON",
     "CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER", "PARTY_LOOT_METHOD_CHANGED", "GROUP_JOINED",
-    "GROUP_FORMED", "GROUP_LEFT", "ADDON_RESTRICTION_STATE_CHANGED"}) do
+    "GROUP_FORMED", "GROUP_LEFT", "ADDON_RESTRICTION_STATE_CHANGED", "QUEST_FINISHED", "GOSSIP_CLOSED"}) do
     pcall(driver.RegisterEvent, driver, event)
 end
-driver:SetScript("OnEvent", function(_, event, ...)
+local function handleEvent(event, ...)
+    if event == "PLAYER_ENTERING_WORLD" then questDialog, gossipDialog = nil, nil end
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then start(); roster() end
     NS.AutoLoot.event(event, ...)
     if not engine then return end
@@ -202,9 +237,12 @@ driver:SetScript("OnEvent", function(_, event, ...)
         if token and (choice == "ready" or choice == "notready") and public(lineID) then
             engine:confirmFromChat(author, token, senderName(name), choice == "ready" and "R" or "N", lineID)
         end
-    elseif event == "QUEST_DETAIL" then detect("accept", call(GetQuestID))
-    elseif event == "QUEST_PROGRESS" or event == "QUEST_COMPLETE" then detect("turnin", call(GetQuestID))
+    elseif event == "QUEST_DETAIL" or event == "QUEST_PROGRESS" or event == "QUEST_COMPLETE" then
+        questDialog = {guid = npc(), questID = call(GetQuestID)}
+        detect(event == "QUEST_DETAIL" and "accept" or "turnin", questDialog.questID)
     elseif event == "GOSSIP_SHOW" then
+        local guid, npcID = npc()
+        gossipDialog = {guid = guid, npcID = npcID, offers = {}}
         detect("gossip")
         local offers = call(C_GossipInfo and C_GossipInfo.GetAvailableQuests)
         local upcoming, seen = {}, {}
@@ -213,6 +251,7 @@ driver:SetScript("OnEvent", function(_, event, ...)
                 if public(offer) and type(offer) == "table" and public(offer.questID) and
                     type(offer.questID) == "number" and NS.Rules["a" .. offer.questID] and not seen[offer.questID] then
                     seen[offer.questID] = true
+                    gossipDialog.offers[offer.questID] = true
                     upcoming[#upcoming + 1] = offer.questID
                 end
             end
@@ -226,29 +265,47 @@ driver:SetScript("OnEvent", function(_, event, ...)
     elseif event == "QUEST_ACCEPT_CONFIRM" then
         if public(channel) and engine.active and NS.Rules[engine.active.ruleID].questID == channel then
             engine:action(channel, "accept")
-            engine.notice = "Group quest invitation received. Use the normal game prompt, then check your quest log."
+            engine.notice = "Quest invite received. Use the game prompt."
+            renderPending = true
         end
+    elseif event == "QUEST_FINISHED" then questDialog = nil
+    elseif event == "GOSSIP_CLOSED" then
+        if gossipDialog then gossipDialog.closedAt = now() end
     elseif event == "QUEST_LOG_UPDATE" then evaluate()
     elseif event == "GROUP_ROSTER_UPDATE" or event == "PARTY_LEADER_CHANGED" or event == "UNIT_CONNECTION" then
         roster(); evaluate()
     end
+end
+driver:SetScript("OnEvent", function(_, event, ...)
+    batchDepth = batchDepth + 1
+    handleEvent(event, ...)
+    batchDepth = batchDepth - 1
+    if batchDepth == 0 then present() end
 end)
 driver:SetScript("OnUpdate", function(_, delta)
     elapsed = elapsed + delta
     if elapsed < 0.5 then return end
     elapsed = 0
+    batchDepth = batchDepth + 1
     if engine then evaluate(); engine:tick() end
     NS.AutoLoot.tick()
-    NS.Settings.refresh()
+    batchDepth = batchDepth - 1
+    if batchDepth == 0 then present() end
 end)
 -- Observation only, after the ordinary control runs. No guessed gossip option IDs.
-if type(hooksecurefunc) == "function" and C_GossipInfo and type(C_GossipInfo.SelectOption) == "function" then
-    pcall(hooksecurefunc, C_GossipInfo, "SelectOption", function()
-        if not engine or not engine.active then return end
+if type(hooksecurefunc) == "function" and C_GossipInfo then
+    local function selected()
+        if not engine or not engine.active or not gossipDialog then return end
         local rule = NS.Rules[engine.active.ruleID]
-        local _, id = npc()
-        if rule.kind == "gossip" and id == rule.npcID then engine:action(rule.questID, "gossip") end
-    end)
+        -- The native selection can close the panel and clear UnitGUID("npc")
+        -- before this post-hook. Use the captured interaction for that callback.
+        if gossipDialog.closedAt and now() - gossipDialog.closedAt > 1 then return end
+        if rule.kind == "gossip" and rule.npcID == gossipDialog.npcID and
+            engine.active.context == gossipDialog.guid then engine:action(rule.questID, "gossip") end
+    end
+    for _, method in ipairs({"SelectOption", "SelectOptionByIndex"}) do
+        if type(C_GossipInfo[method]) == "function" then pcall(hooksecurefunc, C_GossipInfo, method, selected) end
+    end
 end
 SLASH_ZKIRPARTYQUESTING1 = "/zkir"
 SlashCmdList.ZKIRPARTYQUESTING = function(command)

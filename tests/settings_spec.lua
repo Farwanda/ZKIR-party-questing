@@ -175,8 +175,8 @@ test("a hidden solo attempt still announces once after joining a party", functio
     local initial, nextAction = 0, 0
     local rule = c.ns.Rules[c.ns.engine.active.ruleID]
     for _, message in ipairs(c.messages) do
-        if message.chat == "ZKIR: " .. rule.warning then initial = initial + 1 end
-        if message.chat == "ZKIR: " .. rule.nextAction then nextAction = nextAction + 1 end
+        if message.chat == "ZKIR: " .. c.ns.Messages.chatWarning(rule) then initial = initial + 1 end
+        if message.chat == "ZKIR: " .. c.ns.Messages.chatNext(rule) then nextAction = nextAction + 1 end
     end
     expect(initial == 1, "joining a party must send exactly one initial warning")
     expect(nextAction == 0 and not c.ns.engine:allReady(), "nonresponder prevents permission to proceed")
@@ -297,6 +297,46 @@ test("open status tracks event and messaging health", function()
     local noChat = client({party = true}); noChat.env.C_ChatInfo.SendChatMessage = nil
     f = settings(noChat)
     expect(text(noChat, f):find("Party chat is unavailable", 1, true), "missing chat API is visible before an interaction")
+end)
+
+test("hidden settings wait to render the latest state until reopened", function()
+    local c = client({party = true}); local f = settings(c)
+    f:Hide()
+    local writes = {}
+    for _, child in ipairs(c.frames) do
+        if descendant(child, f) then writes[child] = child.textWrites or 0 end
+    end
+    c.event("QUEST_DETAIL"); c.advance(6)
+    for child, count in pairs(writes) do
+        expect((child.textWrites or 0) == count, "closed settings must not redraw during coordination")
+    end
+    slash(c)
+    expect(f:IsShown() and text(c, f):find("Coordinating:", 1, true), "opening settings displays current event status")
+end)
+
+test("visible settings redraw only when displayed state or a setting changes", function()
+    local c = client(); local f = settings(c)
+    local function writes()
+        local total = 0
+        for _, child in ipairs(c.frames) do
+            if descendant(child, f) then total = total + (child.textWrites or 0) end
+        end
+        return total
+    end
+    local initial = writes()
+    c.advance(6); c.ns.Settings.refresh()
+    expect(writes() == initial, "unchanged open settings must not rewrite text during polling")
+    c.event("QUEST_DETAIL")
+    expect(writes() > initial and text(c, f):find("Coordinating:", 1, true), "new event status renders immediately")
+    local statusWrites = writes()
+    c.advance(8)
+    expect(writes() == statusWrites, "unchanged event status stays cached across readiness updates")
+    click(button(c, f, "Small"))
+    expect(writes() > statusWrites and f:GetScale() == 0.85 and
+        button(c, f, "Small").text == "|cffffd160Small|r", "actual setting change refreshes the selection and scale")
+    local settingWrites = writes()
+    c.advance(3); c.ns.Settings.refresh()
+    expect(writes() == settingWrites, "new setting becomes the stable cached presentation")
 end)
 
 test("auto FFA adds exactly two options and both default off", function()

@@ -16,7 +16,7 @@ for spec in sorted((root / "tests").glob("*_spec.lua")):
     runtime = LuaRuntime(unpack_returned_tuples=True)
     runtime.execute(spec.read_text(), name=str(spec))
 runtime = LuaRuntime(unpack_returned_tuples=True)
-runtime.execute('NS = {}; assert(loadfile("ZKIRPartyQuesting/Rules.lua"))("ZKIR", NS)')
+runtime.execute('NS = {}; assert(loadfile("ZKIRPartyQuesting/Messages.lua"))("ZKIR", NS); assert(loadfile("ZKIRPartyQuesting/Rules.lua"))("ZKIR", NS)')
 rules = runtime.globals().NS.Rules
 reviewed = 0
 for record in json.loads((root / "research/coverage.json").read_text())["records"]:

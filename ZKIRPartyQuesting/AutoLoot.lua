@@ -10,21 +10,7 @@ local restrictionEvents = {}
 local message = "Auto FFA is off."
 local restrictions = {"Combat", "Encounter", "ChallengeMode", "PvPMatch", "Map"}
 
-local function public(v)
-    return not (type(issecretvalue) == "function" and issecretvalue(v))
-end
-local function pack(...) return {n = select("#", ...), ...} end
-local function read(fn, ...)
-    if type(fn) ~= "function" then return nil end
-    local result = pack(pcall(fn, ...))
-    if not result[1] then return nil end
-    for i = 2, result.n do if not public(result[i]) then return nil end end
-    return unpack(result, 2, result.n)
-end
-local function field(t, key)
-    if public(t) and type(t) == "table" then return read(function() return t[key] end) end
-    return nil
-end
+local public, read, field = NS.API.public, NS.API.read, NS.API.field
 local function api(name) return C_PartyInfo and C_PartyInfo[name] end
 local function enum(name) return field(Enum and Enum.LootMethod, name) end
 local function options() return NS.Settings.values end
@@ -207,8 +193,6 @@ function Loot.init(db)
     if type(db.autoLoot) ~= "table" then db.autoLoot = {} end
     saved = db.autoLoot
     local values = options()
-    if type(values.ffaFriends) ~= "boolean" then values.ffaFriends = false end
-    if type(values.ffaCharacters) ~= "boolean" then values.ffaCharacters = false end
     local names = {}
     if type(values.ffaNames) == "table" then
         for name, allow in pairs(values.ffaNames) do

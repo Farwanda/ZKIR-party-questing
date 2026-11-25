@@ -64,8 +64,11 @@ local function fixture(db)
     env.DEFAULT_CHAT_FRAME = {AddMessage = function(_, message) notices[#notices + 1] = message end}
     env.SendChatMessage = function() error("Auto FFA must not send chat") end
     env.C_ChatInfo = {SendAddonMessage = function() error("Auto FFA must not send addon messages") end}
-    local chunk = assert(loadfile("ZKIRPartyQuesting/AutoLoot.lua"))
-    setfenv(chunk, env); chunk("ZKIRPartyQuesting", ns)
+    for _, name in ipairs({"API", "Widgets", "Settings", "AutoLoot"}) do
+        local chunk = assert(loadfile("ZKIRPartyQuesting/" .. name .. ".lua"))
+        setfenv(chunk, env); chunk("ZKIRPartyQuesting", ns)
+    end
+    ns.Settings.init(db)
     ns.AutoLoot.init(db)
     local function advance(seconds)
         for _ = 1, seconds * 2 do state.time = state.time + 0.5; ns.AutoLoot.tick() end
