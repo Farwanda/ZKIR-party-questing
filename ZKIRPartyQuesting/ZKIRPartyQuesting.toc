@@ -2,11 +2,12 @@
 ## Title: ZKIR PARTY QUESTING
 ## Notes: Wait together before consequential NPC interactions.
 ## Author: ZKIR
-## Version: 1.0
+## Version: 1.1
 ## SavedVariablesPerCharacter: ZKIRPartyQuestingDB
 Rules.lua
 Core.lua
 Facts.lua
 Settings.lua
+AutoLoot.lua
 UI.lua
 WoW.lua

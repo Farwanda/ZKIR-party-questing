@@ -61,7 +61,8 @@ test("idle command opens versioned loaded status with no party activity", functi
     local c = client({party = true})
     local f = settings(c)
     local content = text(c, f)
-    expect(content:find("1.0", 1, true) and content:find("Loaded", 1, true), "show loaded version")
+    expect(content:find("v" .. c.env.C_AddOns.GetAddOnMetadata("ZKIRPartyQuesting", "Version"), 1, true) and
+        content:find("Loaded", 1, true), "show actual TOC version")
     expect(content:find("Waiting for a supported interaction", 1, true), "show explicit idle state")
     expect(c.ns.Settings.values.sound == true and c.ns.Settings.values.solo == true and
         c.ns.Settings.values.size == "Normal", "defaults should be sound, solo, normal size")
@@ -296,6 +297,114 @@ test("open status tracks event and messaging health", function()
     local noChat = client({party = true}); noChat.env.C_ChatInfo.SendChatMessage = nil
     f = settings(noChat)
     expect(text(noChat, f):find("Party chat is unavailable", 1, true), "missing chat API is visible before an interaction")
+end)
+
+test("auto FFA adds exactly two options and both default off", function()
+    local c = client(); local f = settings(c)
+    expect(c.ns.AutoLoot and type(c.ns.AutoLoot.setCharacters) == "function", "production loot module must load from the TOC")
+    expect(c.ns.Settings.values.ffaFriends == false and c.ns.Settings.values.ffaCharacters == false,
+        "new loot policies are opt-in")
+    expect(frame(c, "ZKIRPartyQuestingFFAFriendsCheckbox"):GetChecked() == false and
+        frame(c, "ZKIRPartyQuestingFFACharactersCheckbox"):GetChecked() == false,
+        "both new controls visibly start unchecked")
+    local checkboxes = 0
+    for _, child in ipairs(c.frames) do
+        if child.kind == "CheckButton" and descendant(child, f) then checkboxes = checkboxes + 1 end
+    end
+    expect(checkboxes == 4, "sound and solo plus exactly two loot checkboxes")
+    expect(text(c, f):find("every other party member", 1, true) and text(c, f):find("can be mixed", 1, true),
+        "explain that each other member must match either enabled option")
+    expect(text(c, f):find("Auto FFA is off.", 1, true), "off state is explicit")
+    local corrupt = client({db = {settings = {ffaFriends = "true", ffaCharacters = 1}}})
+    settings(corrupt)
+    expect(corrupt.ns.Settings.values.ffaFriends == false and corrupt.ns.Settings.values.ffaCharacters == false,
+        "invalid persisted loot flags must fail closed")
+    expect(#c.messages == 0 and #c.sounds == 0, "opening loot settings must not create party activity")
+end)
+
+test("loot toggles are independent, persisted, and notify the runtime", function()
+    local c = client(); settings(c)
+    local updates = 0
+    local original = c.ns.AutoLoot.settingsChanged
+    c.ns.AutoLoot.settingsChanged = function(...)
+        updates = updates + 1
+        return original(...)
+    end
+    toggle(frame(c, "ZKIRPartyQuestingFFAFriendsCheckbox"), true)
+    expect(c.env.ZKIRPartyQuestingDB.settings.ffaFriends == true and
+        c.env.ZKIRPartyQuestingDB.settings.ffaCharacters == false, "friend toggle leaves character choice unchanged")
+    expect(updates == 1, "friend toggle reaches the production runtime immediately")
+    toggle(frame(c, "ZKIRPartyQuestingFFACharactersCheckbox"), true)
+    expect(updates == 2 and c.env.ZKIRPartyQuestingDB.settings.ffaCharacters == true,
+        "character toggle persists and reaches the runtime")
+    toggle(frame(c, "ZKIRPartyQuestingFFAFriendsCheckbox"), false)
+    expect(updates == 3 and c.env.ZKIRPartyQuestingDB.settings.ffaCharacters == true,
+        "either option can be switched off independently")
+    local reloaded = client({db = copy(c.env.ZKIRPartyQuestingDB)}); settings(reloaded)
+    expect(frame(reloaded, "ZKIRPartyQuestingFFAFriendsCheckbox"):GetChecked() == false and
+        frame(reloaded, "ZKIRPartyQuestingFFACharactersCheckbox"):GetChecked() == true,
+        "reload preserves each loot option and its visible state")
+    expect(#c.messages == 0, "loot preferences never send party messages")
+end)
+
+local function characters(c)
+    local f = settings(c)
+    click(button(c, f, "Characters..."))
+    local editor = frame(c, "ZKIRPartyQuestingCharactersWindow")
+    local input = frame(c, "ZKIRPartyQuestingCharactersText")
+    expect(editor and editor:IsShown() and input, "character editor opens with a text field")
+    return editor, input
+end
+
+test("character Save uses the real validator and never enables auto FFA", function()
+    local c = client(); local editor, input = characters(c)
+    input:SetText("  Bob \r\nCara-Other Realm\n\nbob-Realm\n")
+    click(button(c, editor, "Save"))
+    expect(not editor:IsShown(), "successful Save closes the editor")
+    expect(equal(c.env.ZKIRPartyQuestingDB.settings.ffaNames, {['bob-realm'] = true, ['cara-otherrealm'] = true}),
+        "Save resolves current-realm names, normalizes realms, and deduplicates through AutoLoot")
+    expect(c.ns.Settings.values.ffaFriends == false and c.ns.Settings.values.ffaCharacters == false,
+        "saving a character list cannot opt into either loot policy")
+    local reloaded = client({db = copy(c.env.ZKIRPartyQuestingDB)})
+    local _, restored = characters(reloaded)
+    expect(restored:GetText() == "bob-realm\ncara-otherrealm", "saved names survive reload and reopen in stable order")
+    expect(#c.messages == 0 and #c.sounds == 0, "editing the allowlist is local and silent")
+end)
+
+test("invalid character input and cancelled drafts never partially change the allowlist", function()
+    local c = client(); expect(c.ns.AutoLoot.setCharacters("Bob-Realm"), "seed a real existing character list")
+    local previous = c.env.ZKIRPartyQuestingDB.settings.ffaNames
+    local before = copy(previous)
+    local editor, input = characters(c)
+    local invalid = "Cara-Realm\nBad Name"
+    input:SetText(invalid); click(button(c, editor, "Save"))
+    expect(editor:IsShown() and input:GetText() == invalid, "validation failure keeps the draft editable")
+    expect(text(c, editor):find("Use Name-Realm", 1, true), "validation error is visible to the user")
+    expect(c.env.ZKIRPartyQuestingDB.settings.ffaNames == previous and equal(previous, before),
+        "a valid first line must not partially replace the old list when a later line is invalid")
+    input:SetText("Dain-Realm"); click(button(c, editor, "Cancel"))
+    expect(not editor:IsShown() and equal(c.ns.Settings.values.ffaNames, before), "Cancel discards the entire draft")
+    editor, input = characters(c)
+    expect(input:GetText() == "bob-realm", "reopening discards cancelled text")
+    input:SetText("Elya-Realm")
+    expect(type(input.scripts.OnEscapePressed) == "function", "editor supports Escape")
+    input.scripts.OnEscapePressed(input)
+    expect(not editor:IsShown() and equal(c.ns.Settings.values.ffaNames, before), "Escape cannot commit a draft")
+end)
+
+test("loot status refreshes without overwriting an open character draft", function()
+    local c = client(); local editor, input = characters(c)
+    local f = frame(c, "ZKIRPartyQuestingSettingsWindow")
+    input:SetText("Unsubmitted-Realm")
+    c.ns.AutoLoot.status = function() return "Waiting until the party is out of combat." end
+    c.ns.Settings.refresh()
+    expect(text(c, f):find("Waiting until the party is out of combat.", 1, true), "show the runtime's current loot status")
+    expect(editor:IsShown() and input:GetText() == "Unsubmitted-Realm", "status updates preserve the user's editor draft")
+    c.ns.AutoLoot.status = function() error("unavailable") end
+    c.ns.Settings.refresh()
+    expect(text(c, f):find("Auto FFA is unavailable.", 1, true), "status failure is explicit and does not break settings")
+    expect(input:GetText() == "Unsubmitted-Realm" and next(c.ns.Settings.values.ffaNames) == nil,
+        "status failures neither replace nor save the draft")
 end)
 
 print("Settings simulations passed: " .. passed .. " scenarios, " .. checks .. " checks.")

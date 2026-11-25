@@ -1,10 +1,11 @@
 local _, NS = ...
-local Settings = {values = {sound = true, solo = true, size = "Normal"}}
+local Settings = {values = {sound = true, solo = true, size = "Normal", ffaFriends = false, ffaCharacters = false}}
 NS.Settings = Settings
 
 local scales = {Small = 0.85, Normal = 1, Large = 1.15}
 local callbacks, frame, heading, status, sound, solo = {}, nil
 local sizeButtons = {}
+local ffaFriends, ffaCharacters, lootStatus, charactersFrame, characterText, characterError
 
 local function label(parent, x, y, width)
     local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -15,8 +16,8 @@ local function label(parent, x, y, width)
     return text
 end
 
-local function button(text, width, onClick)
-    local control = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+local function button(text, width, onClick, parent)
+    local control = CreateFrame("Button", nil, parent or frame, "UIPanelButtonTemplate")
     control:SetSize(width, 22)
     control:SetText(text)
     control:SetScript("OnClick", onClick)
@@ -48,12 +49,101 @@ function Settings.resetPosition()
     if not frame then return end
     frame:ClearAllPoints()
     frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    if charactersFrame then
+        charactersFrame:ClearAllPoints()
+        charactersFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    end
+end
+
+local function showCharacters()
+    if not charactersFrame then
+        charactersFrame = CreateFrame("Frame", "ZKIRPartyQuestingCharactersWindow", UIParent, "BackdropTemplate")
+        charactersFrame:SetSize(420, 330)
+        charactersFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        charactersFrame:SetFrameStrata("DIALOG")
+        charactersFrame:SetClampedToScreen(true)
+        charactersFrame:SetMovable(true)
+        charactersFrame:EnableMouse(true)
+        charactersFrame:RegisterForDrag("LeftButton")
+        charactersFrame:SetScript("OnDragStart", charactersFrame.StartMoving)
+        charactersFrame:SetScript("OnDragStop", charactersFrame.StopMovingOrSizing)
+        charactersFrame:SetBackdrop({bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 16,
+            insets = {left = 4, right = 4, top = 4, bottom = 4}})
+        charactersFrame:SetBackdropColor(0.05, 0.05, 0.07, 0.97)
+        label(charactersFrame, 14, -14, 350):SetText("|cffffd160AUTO FFA - CHARACTERS|r")
+        local close = button("X", 22, function() charactersFrame:Hide() end, charactersFrame)
+        close:SetPoint("TOPRIGHT", -9, -9)
+        local help = label(charactersFrame, 14, -44, 392)
+        help:SetHeight(40)
+        help:SetText("One Name-Realm per line. A name without a realm uses your current realm. Saving the list does not enable the option.")
+        local scroll = CreateFrame("ScrollFrame", "ZKIRPartyQuestingCharactersScroll", charactersFrame, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", 14, -93)
+        scroll:SetSize(366, 150)
+        characterText = CreateFrame("EditBox", "ZKIRPartyQuestingCharactersText", scroll)
+        characterText:SetMultiLine(true)
+        characterText:SetAutoFocus(false)
+        characterText:SetMaxLetters(0)
+        characterText:SetFontObject(ChatFontNormal)
+        characterText:SetSize(358, 150)
+        characterText:SetTextInsets(4, 4, 4, 4)
+        scroll:SetScrollChild(characterText)
+        characterText:SetScript("OnEscapePressed", function() charactersFrame:Hide() end)
+        characterText:SetScript("OnTextChanged", function()
+            scroll:UpdateScrollChildRect()
+            if characterError then characterError:SetText("") end
+        end)
+        characterText:SetScript("OnCursorChanged", function(_, _, y, _, height)
+            local offset, viewport = scroll:GetVerticalScroll(), scroll:GetHeight()
+            if type(offset) ~= "number" or type(viewport) ~= "number" then return end
+            if -y < offset then scroll:SetVerticalScroll(math.max(0, -y))
+            elseif -y + height > offset + viewport then
+                scroll:SetVerticalScroll(math.max(0, -y + height - viewport))
+            end
+        end)
+        scroll:SetScript("OnMouseDown", function() characterText:SetFocus() end)
+        charactersFrame:SetScript("OnHide", function() characterText:ClearFocus() end)
+        if type(UISpecialFrames) == "table" then
+            UISpecialFrames[#UISpecialFrames + 1] = "ZKIRPartyQuestingCharactersWindow"
+        end
+        characterError = label(charactersFrame, 14, -253, 392)
+        characterError:SetHeight(32)
+        characterError:SetTextColor(1, 0.4, 0.35)
+        local save = button("Save", 92, function()
+            if not NS.AutoLoot or type(NS.AutoLoot.setCharacters) ~= "function" then
+                characterError:SetText("Character settings are unavailable. Please try again.")
+                return
+            end
+            local ok, saved, message = pcall(NS.AutoLoot.setCharacters, characterText:GetText())
+            if not ok or not saved then
+                characterError:SetText(ok and type(message) == "string" and message or "Could not save the character list.")
+                return
+            end
+            charactersFrame:Hide()
+            changed()
+        end, charactersFrame)
+        save:SetPoint("BOTTOMRIGHT", -114, 14)
+        local cancel = button("Cancel", 92, function() charactersFrame:Hide() end, charactersFrame)
+        cancel:SetPoint("BOTTOMRIGHT", -14, 14)
+    end
+    local text = ""
+    if NS.AutoLoot and type(NS.AutoLoot.charactersText) == "function" then
+        local ok, value = pcall(NS.AutoLoot.charactersText)
+        if ok and type(value) == "string" then text = value end
+    end
+    characterText:SetText(text)
+    characterText:SetCursorPosition(0)
+    characterError:SetText("")
+    charactersFrame:SetScale(Settings.sizeScale())
+    charactersFrame:Show()
+    charactersFrame:Raise()
+    characterText:SetFocus()
 end
 
 local function create()
     if frame then return end
     frame = CreateFrame("Frame", "ZKIRPartyQuestingSettingsWindow", UIParent, "BackdropTemplate")
-    frame:SetSize(360, 278)
+    frame:SetSize(360, 458)
     Settings.resetPosition()
     frame:SetFrameStrata("DIALOG")
     frame:SetClampedToScreen(true)
@@ -91,7 +181,17 @@ local function create()
         if NS.UI then NS.UI.resetPosition() else Settings.resetPosition() end
     end)
     reset:SetPoint("TOPLEFT", 184, -199)
-    label(frame, 14, -238, 332):SetText("Party coordination always stays automatic.")
+    label(frame, 14, -241, 332):SetText("|cffffd160Automatically use Free for All|r")
+    ffaFriends = checkbox("ZKIRPartyQuestingFFAFriendsCheckbox", "With Battle.net friends", -262, "ffaFriends")
+    ffaCharacters = checkbox("ZKIRPartyQuestingFFACharactersCheckbox", "With these characters", -291, "ffaCharacters")
+    local characters = button("Characters...", 104, showCharacters)
+    characters:SetPoint("TOPRIGHT", -14, -294)
+    local eligibility = label(frame, 14, -330, 332)
+    eligibility:SetHeight(40)
+    eligibility:SetText("When you lead, every other party member must match an enabled option. Friends and listed characters can be mixed.")
+    lootStatus = label(frame, 14, -378, 332)
+    lootStatus:SetHeight(38)
+    label(frame, 14, -430, 332):SetText("Party coordination always stays automatic.")
 end
 
 function Settings.init(db, options)
@@ -100,6 +200,8 @@ function Settings.init(db, options)
     local values = db.settings
     if type(values.sound) ~= "boolean" then values.sound = true end
     if type(values.solo) ~= "boolean" then values.solo = true end
+    if type(values.ffaFriends) ~= "boolean" then values.ffaFriends = false end
+    if type(values.ffaCharacters) ~= "boolean" then values.ffaCharacters = false end
     if not scales[values.size] then values.size = "Normal" end
     Settings.values = values
     Settings.refresh()
@@ -117,10 +219,21 @@ function Settings.refresh()
     status:SetText(message)
     sound:SetChecked(Settings.values.sound)
     solo:SetChecked(Settings.values.solo)
+    ffaFriends:SetChecked(Settings.values.ffaFriends)
+    ffaCharacters:SetChecked(Settings.values.ffaCharacters)
+    local lootMessage = "Auto FFA is off."
+    if NS.AutoLoot and type(NS.AutoLoot.status) == "function" then
+        local ok, value = pcall(NS.AutoLoot.status)
+        lootMessage = ok and type(value) == "string" and value or "Auto FFA is unavailable."
+    elseif Settings.values.ffaFriends or Settings.values.ffaCharacters then
+        lootMessage = "Auto FFA is unavailable."
+    end
+    lootStatus:SetText(lootMessage)
     for size, control in pairs(sizeButtons) do
         control:SetText(size == Settings.values.size and ("|cffffd160" .. size .. "|r") or size)
     end
     frame:SetScale(Settings.sizeScale())
+    if charactersFrame then charactersFrame:SetScale(Settings.sizeScale()) end
 end
 
 function Settings.show()

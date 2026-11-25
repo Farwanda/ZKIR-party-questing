@@ -144,7 +144,8 @@ local function start()
     local db = ZKIRPartyQuestingDB
     local version = call(C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata, ADDON, "Version")
     NS.Settings.init(db, {status = status, version = type(version) == "string" and version or "unknown",
-        changed = function() NS.UI.applySettings() end})
+        changed = function() NS.UI.applySettings(); NS.AutoLoot.settingsChanged() end})
+    NS.AutoLoot.init(db)
     local me = fullName("player")
     if not me then return end
     db.boot = (tonumber(db.boot) or 0) + 1
@@ -178,11 +179,13 @@ local driver = CreateFrame("Frame")
 for _, event in ipairs({"PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "GROUP_ROSTER_UPDATE", "UNIT_CONNECTION",
     "PARTY_LEADER_CHANGED", "QUEST_DETAIL", "QUEST_PROGRESS", "QUEST_COMPLETE", "QUEST_LOG_UPDATE",
     "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_ACCEPT_CONFIRM", "GOSSIP_SHOW", "CHAT_MSG_ADDON",
-    "CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER"}) do
+    "CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER", "PARTY_LOOT_METHOD_CHANGED", "GROUP_JOINED",
+    "GROUP_FORMED", "GROUP_LEFT", "ADDON_RESTRICTION_STATE_CHANGED"}) do
     pcall(driver.RegisterEvent, driver, event)
 end
 driver:SetScript("OnEvent", function(_, event, ...)
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then start(); roster() end
+    NS.AutoLoot.event(event, ...)
     if not engine then return end
     local a, b, channel, sender = ...
     if event == "CHAT_MSG_ADDON" then
@@ -235,6 +238,7 @@ driver:SetScript("OnUpdate", function(_, delta)
     if elapsed < 0.5 then return end
     elapsed = 0
     if engine then evaluate(); engine:tick() end
+    NS.AutoLoot.tick()
     NS.Settings.refresh()
 end)
 -- Observation only, after the ordinary control runs. No guessed gossip option IDs.

@@ -47,7 +47,8 @@ local function client(options)
         return unit == "player" and "Alice" or "Bob", "Realm"
     end
     env.ZKIRPartyQuestingDB = options.db
-    env.C_AddOns = {GetAddOnMetadata = function(_, key) if key == "Version" then return "1.0" end end}
+    local version
+    env.C_AddOns = {GetAddOnMetadata = function(_, key) if key == "Version" then return version end end}
     env.GetAddOnMetadata = env.C_AddOns.GetAddOnMetadata
     env.SOUNDKIT = {RAID_WARNING = 8959}
     if not options.missingSound then
@@ -97,6 +98,7 @@ local function client(options)
     env.CompleteQuest = function() error("addon must never complete a quest") end
     env.GetQuestReward = function() error("addon must never claim a reward") end
     for line in io.lines("ZKIRPartyQuesting/ZKIRPartyQuesting.toc") do
+        version = line:match("^## Version: (.+)$") or version
         if line:match("%.lua$") then
             local chunk = assert(loadfile("ZKIRPartyQuesting/" .. line)); setfenv(chunk, env); chunk("ZKIRPartyQuesting", ns)
         end
