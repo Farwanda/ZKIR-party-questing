@@ -214,6 +214,122 @@ test("normal action retires preparation, solo never sends chat", function()
     local x = World.new({A, B}); x:start(); x.nodes[B].core:action(155, "accept"); x:pump(1)
     assert(x.nodes[A].core.active.started); assert(not x.nodes[A].core:allReady())
 end)
+test("completed solo actions cannot open or announce an old event to a later party", function()
+    for _, ruleID in ipairs({"a155", "t4201", "g2078"}) do
+        for _, reload in ipairs({false, true}) do
+            local w = World.new({A}); local rule = NS.Rules[ruleID]
+            w.nodes[A].core:detect(ruleID, "solo-npc"); w:pump(6)
+            w.nodes[A].core:action(rule.questID, rule.kind); w:pump(1)
+            assert(w.nodes[A].core.active.started)
+            if reload then w:add(A, w.nodes[A].saved) end
+            w.roster[2] = {name = B, connected = true, leader = false}
+            w:rosterChanged(); w:add(B); w:pump(30)
+            w:chatCount(0)
+            assert(not w.nodes[B].core.active, "fresh party member must not adopt the completed solo event")
+            assert(not w.nodes[A].core:allReady(), "completed solo preparation stays retired after joining")
+            for _, message in ipairs(w.wire) do
+                assert(not message.payload:match("^1|[EQ]|"), "completed solo event cannot start new discovery or announcement claims")
+            end
+        end
+    end
+end)
+test("action during an initial announcement claim cancels local and remote late warnings", function()
+    for _, actor in ipairs({A, B}) do
+        local w = World.new({A, B}); w.nodes[A].core:detect("a155", "npc"); w:pump(6)
+        local owner = w.nodes[A].core
+        assert(owner.pending and owner.pending.stage == "I", "fixture must have an in-flight initial claim")
+        w:chatCount(0)
+        local key, fingerprint = owner.active.key, owner.pending.fingerprint
+        w.nodes[actor].core:action(155, "accept"); w:pump(0.25)
+        assert(owner.active.started and not owner.pending, "observed action cancels the claim before its delay expires")
+        local before = #w.wire
+        w.nodes[B].core:receive(A, "1|Q|" .. key .. "|I|" .. fingerprint)
+        eq(#w.wire, before, "late claim cannot receive a new acknowledgement after action")
+        owner:receive(B, "1|K|" .. key .. "|I|" .. fingerprint)
+        w:pump(25); w:chatCount(0)
+    end
+end)
+test("started event packets retire the current attempt but cannot create or replace a session", function()
+    local w = World.new({A, B}); local receiver = w.nodes[B].core
+    receiver:receive(A, "1|E|1000.old.1|0|a155|old-npc|1000|1")
+    assert(not receiver.active, "already-started traffic cannot open a new session")
+    receiver:detect("a4245", "current-npc")
+    local current = copy(receiver.active)
+    receiver:receive(A, table.concat({"1", "E", "1000.old.2", current.key, "a155", "old-npc", "1000", "1"}, "|"))
+    eq(receiver.active.key, current.key, "already-started traffic cannot replace an unrelated active attempt")
+    assert(not receiver.active.started)
+
+    w = World.new({A, B}); w.nodes[A].core:detect("a155", "npc"); w:pump(6)
+    receiver = w.nodes[A].core; current = copy(receiver.active)
+    assert(receiver.pending and receiver.pending.stage == "I")
+    receiver:receive(B, table.concat({"1", "E", current.key, current.parent, current.ruleID,
+        current.context, tostring(current.time), "1"}, "|"))
+    assert(receiver.active.started and not receiver.pending and not receiver:allReady(),
+        "same-key started packet retires readiness and any pending announcement")
+    receiver:receive(B, table.concat({"1", "E", current.key, current.parent, current.ruleID,
+        current.context, tostring(current.time), "0"}, "|"))
+    assert(receiver.active.started, "a late pre-action snapshot cannot reopen the completed attempt")
+    w.nodes[B].core:action(155, "accept"); w:pump(25); w:chatCount(0)
+end)
+test("heartbeat recovers a lost immediate action message for existing participants", function()
+    local w = World.new({A, B}); w:start(); local dropped = false
+    w.drop = function(message, recipient)
+        if not dropped and message.sender == B and recipient == A and message.payload:match("^1|X|") then
+            dropped = true; return true
+        end
+    end
+    w.nodes[B].core:action(155, "accept"); w:pump(0.25)
+    assert(dropped and not w.nodes[A].core.active.started, "fixture must lose the immediate action notification")
+    w:pump(6)
+    assert(w.nodes[A].core.active.started and not w.nodes[A].core:allReady(),
+        "existing participant learns retirement from repeated exact-event traffic")
+    w:chatCount(2, A)
+end)
+test("completed party scope cannot return after members leave and rejoin", function()
+    local w = World.new({A, B}); w:start(); w.nodes[B].core:action(155, "accept"); w:pump(1)
+    local firstNewMessage = #w.wire + 1
+    for _, member in ipairs({C, B}) do
+        w.nodes[B], w.nodes[C] = nil, nil
+        w.roster[2] = {name = member, connected = true, leader = false}
+        w:rosterChanged(); w:add(member); w:pump(10)
+        assert(not w.nodes[member].core.active, "new or rejoined client must not adopt the finished party event")
+    end
+    for i = firstNewMessage, #w.wire do
+        assert(not w.wire[i].payload:match("^1|E|"), "the old roster returning must not restore permission to publish the finished event")
+    end
+    w:chatCount(2, A)
+end)
+test("concurrent aliases converge without undoing an already observed action", function()
+    local w = World.new({A, B})
+    w.nodes[A].core:detect("a155", "npc"); w.nodes[B].core:detect("a155", "npc")
+    local higher = w.nodes[A].core.active.key > w.nodes[B].core.active.key and A or B
+    local lower = higher == A and B or A
+    local highCore, lowCore = w.nodes[higher].core, w.nodes[lower].core
+    local high, low = copy(highCore.active), copy(lowCore.active)
+    highCore:action(155, "accept")
+    lowCore:receive(higher, table.concat({"1", "E", high.key, high.parent, high.ruleID,
+        high.context, tostring(high.time), "1"}, "|"))
+    assert(lowCore.active.started, "known concurrent attempt can learn that its action already happened")
+    highCore:receive(lower, table.concat({"1", "E", low.key, low.parent, low.ruleID,
+        low.context, tostring(low.time), "0"}, "|"))
+    assert(highCore.active.started, "lower pre-action alias cannot undo a locally observed action")
+    w:pump(25)
+    eq(highCore.active.key, lowCore.active.key, "concurrent attempts still converge")
+    assert(highCore.active.started and lowCore.active.started)
+    w:chatCount(0)
+end)
+test("an explicit retry after retirement starts a fresh coordinated attempt", function()
+    local w = World.new({A, B}); w:start(); w.nodes[B].core:action(155, "accept"); w:pump(5)
+    local completed, oldKey = copy(w.wire), w.nodes[A].core.active.key
+    assert(w.nodes[A].core:retry(), "retired events still permit an explicit new attempt")
+    local freshKey = w.nodes[A].core.active.key
+    assert(freshKey ~= oldKey and not w.nodes[A].core.active.started)
+    w:pump(25); w:ready(); w:chatCount(4, A)
+    for _, message in ipairs(completed) do w:deliver(message) end
+    w:pump(6)
+    eq(w.nodes[A].core.active.key, freshKey); eq(w.nodes[B].core.active.key, freshKey)
+    w:ready(); w:chatCount(4, A)
+end)
 test("untrusted malformed/outsider packets do not throw or confirm", function()
     local w = World.new({A, B}); w:start()
     for _, data in ipairs({"", "1|E", "1|F", "1|M", "2|E|fake", string.rep("x", 256)}) do

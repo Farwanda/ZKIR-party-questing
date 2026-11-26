@@ -9,11 +9,12 @@ local function test(name, fn)
 end
 local function fixture()
     local c = client({party = true})
-    local state = {method = 3, leader = true, friend = true}
+    local state = {method = 3, leader = true, friend = true, inInstance = false, instanceType = "none"}
     local calls = {}
     c.env.Enum = {LootMethod = {Freeforall = 0, Group = 3, Roundrobin = 1,
         Masterlooter = 2, Needbeforegreed = 4, Personal = 5}}
     c.env.IsInGroup = function(category) return category == 1 end
+    c.env.IsInInstance = function() return state.inInstance, state.instanceType end
     c.env.UnitGUID = function(unit) return unit == "player" and "Player-1-ALICE" or "Player-1-BOB" end
     c.env.UnitIsGroupLeader = function(unit)
         if unit == "player" then return state.leader end
@@ -98,6 +99,26 @@ test("nested loot and roster events render coordination once per update", functi
     c.advance(0.5)
     expect(c.env.ZKIRPartyQuestingDB.autoLoot.hold == "owned" and not c.ns.engine.active.started,
         "batching preserves loot readback and the unrelated unresolved quest")
+end)
+
+test("world entry applies dungeon Group Loot independently of outdoor FFA settings", function()
+    local c, state, calls, toggle = fixture()
+    state.method, state.friend, state.inInstance, state.instanceType = 0, false, true, "party"
+    c.event("PLAYER_ENTERING_WORLD"); c.advance(6)
+    expect(#calls == 1 and calls[1] == 3 and state.method == 3,
+        "entering a dungeon replaces manual FFA even with both options off and an untrusted member")
+    expect(c.ns.Settings.values.ffaFriends == false and c.ns.Settings.values.ffaCharacters == false,
+        "dungeon behavior cannot opt into an outdoor FFA policy")
+    toggle(true); state.friend = true; c.advance(5)
+    expect(#calls == 1 and state.method == 3, "enabled outdoor FFA cannot run inside the dungeon")
+    state.inInstance, state.instanceType = false, "none"
+    c.event("PLAYER_ENTERING_WORLD"); c.advance(2)
+    expect(#calls == 1, "world exit starts a fresh stability interval")
+    c.advance(3)
+    expect(#calls == 2 and calls[2] == 0 and state.method == 0, "trusted outdoor party resumes FFA after stabilization")
+    toggle(false); c.advance(2)
+    expect(#calls == 3 and calls[3] == 3, "outside restoration uses the confirmed dungeon Group baseline")
+    expect(#c.messages == 0, "dungeon loot policy sends no party or addon messages")
 end)
 
 print("Loot adapter simulations passed: " .. passed .. " scenarios, " .. checks .. " checks.")

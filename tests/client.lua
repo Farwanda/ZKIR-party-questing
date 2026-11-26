@@ -157,6 +157,7 @@ local function client(options)
     end
     env.GetNumSubgroupMembers = function() return type(options.party) == "number" and options.party or options.party and 1 or 0 end
     env.IsInRaid = function() return false end
+    env.IsInInstance = function() return options.inInstance == true, options.instanceType or "none" end
     env.UnitLevel = function() return 60 end
     env.UnitFactionGroup = function() return "Alliance" end
     env.UnitClass = function() return "Warrior", "WARRIOR", 1 end

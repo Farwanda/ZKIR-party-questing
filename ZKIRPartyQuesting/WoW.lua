@@ -97,7 +97,7 @@ local function quest(id)
         complete = boolean(call(api.IsComplete, id))}
 end
 local function evaluate()
-    if not engine or not engine.active then return end
+    if not engine or not engine.active or engine.active.started then return end
     local rule = NS.Rules[engine.active.ruleID]
     local api = C_QuestLog or {}
     local _, count = call(api.GetNumQuestLogEntries or GetNumQuestLogEntries)

@@ -9,7 +9,7 @@ end
 local function fixture(db)
     db = db or {}; db.settings = type(db.settings) == "table" and db.settings or {}
     local state = {time = 0, method = 3, master = 0, count = 1, leader = true, home = true,
-        instance = false, raid = false, combat = false, loot = 0, bn = true,
+        instance = false, inInstance = false, instanceType = "none", raid = false, combat = false, loot = 0, bn = true,
         members = {player = {guid = "Player-1-SELF", name = "Alice", realm = "Realm", connected = true},
             party1 = {guid = "Player-1-BOB", name = "Bob", realm = "Realm", connected = true}},
         friends = {["Player-1-BOB"] = true}}
@@ -20,6 +20,7 @@ local function fixture(db)
     env.Enum = {LootMethod = {Freeforall = 0, Group = 3, Roundrobin = 1, Masterlooter = 2,
         Needbeforegreed = 4, Personal = 5}}
     env.IsInRaid = function() return state.raid end
+    env.IsInInstance = function() return state.inInstance, state.instanceType end
     env.IsInGroup = function(category) if category == 1 then return state.home end; return state.instance end
     env.GetNumSubgroupMembers = function() return state.count end
     env.UnitGUID = function(unit) return state.members[unit] and state.members[unit].guid end
@@ -86,6 +87,10 @@ local function extra(c, index, name, friend)
     c.state.members["party" .. index] = {guid = guid, name = name, realm = "Realm", connected = true}
     c.state.count = math.max(c.state.count, index)
     c.state.friends[guid] = friend
+end
+local function dungeon(c, inside)
+    c.state.inInstance, c.state.instanceType = inside, inside and "party" or "none"
+    c.loot.event("PLAYER_ENTERING_WORLD")
 end
 
 test("both policies default off and never change loot or send messages", function()
@@ -466,4 +471,214 @@ test("leaving the old home party clears its manual pause without writing into a 
     expect(#c.calls == 2 and c.state.method == 0, "new party independently qualifies after stable trust")
 end)
 
-print("Auto FFA simulations passed: " .. passed .. " scenarios, " .. checks .. " checks.")
+test("dungeons use Group Loot with FFA disabled, untrusted members, or manual FFA", function()
+    for _, enabled in ipairs({false, true}) do
+        for _, method in ipairs({0, 1, 2, 4}) do
+            local c = fixture(); c.state.method = method; c.state.friends = {}; c.state.bn = false
+            c.enable(enabled, enabled); dungeon(c, true); c.advance(8)
+            expect(#c.calls == 1 and c.calls[1].method == 3 and c.state.method == 3,
+                "dungeon Group Loot does not depend on outdoor options, trust, or prior method")
+            c.advance(20); expect(#c.calls == 1, "confirmed dungeon method stays stable")
+        end
+    end
+    local c = fixture(); extra(c, 2, "Carla", false); extra(c, 3, "Dain", false); extra(c, 4, "Elya", false)
+    c.state.method = 0; dungeon(c, true); c.advance(8)
+    expect(#c.calls == 1 and c.state.method == 3, "five-person ordinary party gets Group Loot without trust")
+    c = fixture(); dungeon(c, true); c.advance(30)
+    expect(#c.calls == 0 and c.state.method == 3, "already-active Group Loot needs no write")
+    c.state.method = 0; c.loot.event("PARTY_LOOT_METHOD_CHANGED"); c.advance(8)
+    expect(#c.calls == 1 and c.state.method == 3, "a later manual FFA choice cannot override dungeon Group Loot")
+    c = fixture(); c.state.method = 0; c.state.members.party1.guid = nil
+    c.state.members.party1.name = nil; c.env.C_BattleNet = nil; dungeon(c, true); c.advance(8)
+    expect(#c.calls == 1 and c.state.method == 3, "dungeon Group Loot needs party authority, not friend identities")
+end)
+
+test("dungeon policy still requires ordinary-party leadership and two-to-five players", function()
+    local variants = {
+        function(c) c.state.leader = false end, function(c) c.state.leader = nil end,
+        function(c) c.state.count = 0 end, function(c) c.state.count = 5 end,
+        function(c) c.state.raid = true end, function(c) c.state.instance = true end,
+        function(c) c.state.home = false end, function(c) c.env.GetNumSubgroupMembers = nil end,
+        function(c) c.env.UnitIsGroupLeader = nil end,
+    }
+    for index, alter in ipairs(variants) do
+        local c = fixture(); c.state.method = 0; dungeon(c, true); alter(c); c.advance(12)
+        expect(#c.calls == 0, "dungeon priority cannot bypass party authority: " .. index)
+    end
+end)
+
+test("unknown or non-dungeon instance context never authorizes outdoor FFA", function()
+    local variants = {
+        function(c) c.env.IsInInstance = nil end,
+        function(c) c.env.IsInInstance = function() error("instance state unavailable") end end,
+        function(c) c.env.IsInInstance = function() return nil, "none" end end,
+        function(c) c.env.IsInInstance = function() return {secret = true}, "none" end end,
+        function(c) c.env.IsInInstance = function() return false, {secret = true} end end,
+        function(c) c.env.IsInInstance = function() return false, nil end end,
+        function(c) c.env.IsInInstance = function() return false, "party" end end,
+        function(c) c.env.IsInInstance = function() return true, "raid" end end,
+        function(c) c.env.IsInInstance = function() return true, "pvp" end end,
+        function(c) c.env.IsInInstance = function() return true, "arena" end end,
+        function(c) c.env.IsInInstance = function() return true, "unknown" end end,
+    }
+    for index, alter in ipairs(variants) do
+        local c = fixture(); c.enable(true, false); alter(c); c.advance(15)
+        expect(#c.calls == 0, "uncertain or different instance type cannot be treated as outdoors: " .. index)
+    end
+end)
+
+test("dungeon Group Loot waits for combat, looting, and restrictions to clear", function()
+    local variants = {
+        {function(c) c.state.combat = true end, function(c) c.state.combat = false end},
+        {function(c) c.state.loot = 1 end, function(c) c.state.loot = 0 end},
+        {function(c)
+            c.env.Enum.AddOnRestrictionType = {Combat = 1, Encounter = 2, ChallengeMode = 3, PvPMatch = 4, Map = 5}
+            c.env.C_RestrictedActions = {GetAddOnRestrictionState = function() return 0 end}
+            c.loot.event("ADDON_RESTRICTION_STATE_CHANGED", 1, 1)
+        end, function(c) c.loot.event("ADDON_RESTRICTION_STATE_CHANGED", 1, 0) end},
+        {function(c) c.env.C_RestrictedActions = {GetAddOnRestrictionState = function() return nil end} end,
+            function(c) c.env.C_RestrictedActions = nil end},
+    }
+    for index, pair in ipairs(variants) do
+        local c = fixture(); c.state.method = 0; dungeon(c, true); pair[1](c); c.advance(8)
+        expect(#c.calls == 0, "dungeon writes must defer while unsafe: " .. index)
+        pair[2](c); c.advance(8)
+        expect(#c.calls == 1 and c.state.method == 3, "safe dungeon state allows a single request: " .. index)
+    end
+    local c = fixture(); c.state.method = 0; c.state.members.party1.combat = true
+    dungeon(c, true); c.advance(8)
+    expect(#c.calls == 1 and c.state.method == 3,
+        "remote-only combat does not postpone Group Loot when local game restrictions permit it")
+end)
+
+test("dungeon requests require confirmation and never spam after rejection or timeout", function()
+    for _, failure in ipairs({"reject", "throwSetter", "unconfirmed"}) do
+        local c = fixture(); c.state.method = 0; dungeon(c, true)
+        if failure == "unconfirmed" then
+            c.env.C_PartyInfo.SetLootMethod = function(method)
+                c.calls[#c.calls + 1] = {method = method, time = c.state.time}; return true
+            end
+        else c.state[failure] = true end
+        c.advance(30)
+        expect(#c.calls == 1 and c.calls[1].method == 3 and c.state.method == 0,
+            "failed Group Loot gets one request: " .. failure)
+        local status = c.loot.status():lower()
+        expect(contains(status, "manually") or contains(status, "failed") or contains(status, "not confirmed"),
+            "failure stays visible instead of claiming Group Loot is active: " .. failure)
+        for _ = 1, 3 do c.loot.event("GROUP_ROSTER_UPDATE"); c.loot.event("PLAYER_ENTERING_WORLD"); c.advance(5) end
+        expect(#c.calls == 1, "routine events cannot retry unchanged dungeon failure: " .. failure)
+        local instance = c.env.IsInInstance
+        c.env.IsInInstance = nil; c.advance(2)
+        c.env.IsInInstance = instance; c.advance(8)
+        expect(#c.calls == 1, "temporary missing instance data cannot clear a failed dungeon request: " .. failure)
+    end
+end)
+
+test("missing dungeon loot APIs and unreadable current methods remain read-only", function()
+    local variants = {
+        function(c) c.env.C_PartyInfo.SetLootMethod = nil end,
+        function(c) c.env.C_PartyInfo.IsLootMethodAvailable = function() return false end end,
+        function(c) c.env.C_PartyInfo.GetLootMethod = function() return nil end end,
+        function(c) c.env.C_PartyInfo.GetLootMethod = function() return {secret = true} end end,
+        function(c) c.env.Enum.LootMethod.Group = nil end,
+    }
+    for index, alter in ipairs(variants) do
+        local c = fixture(); c.state.method = 0; dungeon(c, true); alter(c); c.advance(15)
+        expect(#c.calls == 0 and c.state.method == 0, "unavailable Group Loot evidence prevents guessing: " .. index)
+    end
+end)
+
+test("confirmed dungeon Group Loot replaces the old outdoor restoration baseline", function()
+    local c = fixture(); c.state.method = 1; c.enable(true, false); c.advance(4)
+    expect(c.state.method == 0, "fixture starts with addon-owned outdoor FFA")
+    dungeon(c, true); c.advance(8)
+    expect(c.state.method == 3 and #c.calls == 2, "dungeon overrides FFA with Group Loot")
+    dungeon(c, false); c.advance(2)
+    expect(#c.calls == 2, "leaving must begin a new outdoor stability interval")
+    c.advance(3)
+    expect(c.state.method == 0 and #c.calls == 3, "enabled outdoor policy may resume after stable trust")
+    c.enable(false, false); c.advance(3)
+    expect(c.state.method == 3 and #c.calls == 4 and c.calls[4].method == 3,
+        "outdoor FFA restores the confirmed Group baseline, never the pre-dungeon method")
+end)
+
+test("dungeon override preserves an existing manual or interrupted outdoor pause", function()
+    for _, hold in ipairs({"manual", "interrupted"}) do
+        local c = fixture({settings = {ffaFriends = true}, autoLoot = {hold = hold}})
+        c.state.method = 0; dungeon(c, true); c.advance(8)
+        expect(#c.calls == 1 and c.state.method == 3, "dungeon policy has priority over an outdoor pause")
+        dungeon(c, false); c.advance(15)
+        expect(#c.calls == 1 and c.state.method == 3 and c.db.autoLoot.hold == hold,
+            "leaving dungeon must retain the original outdoor pause: " .. hold)
+    end
+end)
+
+test("entering a dungeon supersedes an in-flight FFA request without restoring its old baseline", function()
+    local c = fixture(); c.state.method = 1; c.enable(true, false)
+    local setter = c.env.C_PartyInfo.SetLootMethod
+    c.env.C_PartyInfo.SetLootMethod = function(method, ...)
+        if method ~= 0 then return setter(method, ...) end
+        c.calls[#c.calls + 1] = {method = method, time = c.state.time}; return true
+    end
+    c.advance(2.5); expect(#c.calls == 1 and c.db.autoLoot.hold == "pending", "FFA request is still in flight")
+    dungeon(c, true); c.advance(0.5)
+    c.state.method = 0; c.loot.event("PARTY_LOOT_METHOD_CHANGED"); c.advance(10)
+    expect(c.state.method == 3, "late outdoor FFA readback cannot remain active inside the dungeon")
+    local ffa = 0
+    for _, call in ipairs(c.calls) do
+        if call.method == 0 then ffa = ffa + 1 end
+        expect(call.method ~= 1, "dungeon entry must not restore the superseded old baseline")
+    end
+    expect(ffa == 1, "no new FFA requests are issued inside the dungeon")
+end)
+
+test("entering during a pending restore cannot finish on the superseded outdoor method", function()
+    local c = fixture(); c.state.method = 1; c.enable(true, false); c.advance(4)
+    local setter = c.env.C_PartyInfo.SetLootMethod
+    c.env.C_PartyInfo.SetLootMethod = function(method, ...)
+        if method ~= 1 then return setter(method, ...) end
+        c.calls[#c.calls + 1] = {method = method, time = c.state.time}; return true
+    end
+    c.state.friends = {}; c.advance(0.5)
+    expect(#c.calls == 2 and c.calls[2].method == 1 and c.state.method == 0, "old restoration is in flight")
+    dungeon(c, true); c.advance(0.5)
+    c.state.method = 1; c.loot.event("PARTY_LOOT_METHOD_CHANGED"); c.advance(10)
+    expect(c.state.method == 3, "late restore readback must yield to dungeon Group Loot")
+    local restores = 0
+    for _, call in ipairs(c.calls) do if call.method == 1 then restores = restores + 1 end end
+    expect(restores == 1, "dungeon policy never reissues the obsolete restoration")
+end)
+
+test("leaving with Group Loot unconfirmed cannot issue overlapping outdoor FFA", function()
+    local c = fixture(); c.state.method = 0; c.enable(true, false); dungeon(c, true)
+    local setter = c.env.C_PartyInfo.SetLootMethod
+    c.env.C_PartyInfo.SetLootMethod = function(method, ...)
+        if method ~= 3 then return setter(method, ...) end
+        c.calls[#c.calls + 1] = {method = method, time = c.state.time}; return true
+    end
+    c.advance(3); expect(#c.calls == 1 and c.calls[1].method == 3, "Group Loot is awaiting readback")
+    dungeon(c, false); c.advance(1)
+    expect(#c.calls == 1, "leaving does not send FFA while Group Loot is unresolved")
+    c.state.method = 3; c.loot.event("PARTY_LOOT_METHOD_CHANGED"); c.advance(5)
+    expect(#c.calls == 2 and c.calls[2].method == 0 and c.state.method == 0,
+        "observed Group Loot permits a fresh outdoor FFA request after stabilization")
+end)
+
+test("reload and leadership changes cannot replay stale outdoor commands inside a dungeon", function()
+    local original = fixture(); original.enable(true, false); original.advance(4)
+    local c = fixture(original.db); c.state.method = 0; dungeon(c, true); c.advance(8)
+    expect(#c.calls == 1 and c.calls[1].method == 3, "reloaded dungeon derives a fresh Group request from live state")
+    dungeon(c, false); c.advance(10)
+    expect(#c.calls == 1 and c.db.autoLoot.hold == "interrupted", "reload recovery hold remains paused outdoors")
+    c = fixture(); c.state.method = 0; dungeon(c, true)
+    c.env.C_PartyInfo.SetLootMethod = function(method)
+        c.calls[#c.calls + 1] = {method = method, time = c.state.time}; return true
+    end
+    c.advance(3); expect(#c.calls == 1, "fixture has one pending Group request")
+    c.state.leader = false; c.loot.event("PARTY_LEADER_CHANGED"); c.advance(12)
+    expect(#c.calls == 1 and c.state.method == 0, "former leader does not retry or restore loot")
+    c.state.leader = true; c.loot.event("PARTY_LEADER_CHANGED"); c.advance(8)
+    expect(#c.calls <= 2, "new current leadership may reassess once, never replay the old loop")
+end)
+
+print("Loot policy simulations passed: " .. passed .. " scenarios, " .. checks .. " checks.")

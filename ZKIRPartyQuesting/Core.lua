@@ -74,6 +74,7 @@ function Core:setRoster(list)
     end
     local signature = table.concat(parts, ",")
     if signature ~= self.rosterSignature then
+        if self.active and self.active.retiredRoster ~= signature then self.active.retiredRoster = nil end
         self:invalidate()
         -- A roster that changes away and back must not revive an old signed decision.
         if self.localFact then
@@ -155,7 +156,16 @@ end
 function Core:broadcast()
     local a = self.active
     if not a then return end
-    self:send("E", a.key, a.parent, a.ruleID, a.context, tostring(a.time), a.started and "1" or "0")
+    if a.started then
+        -- Exact-key retirement reaches existing peers without opening a past
+        -- interaction for a new party. Only the original party may reconcile aliases.
+        self:send("X", a.key)
+        if a.retiredRoster and a.retiredRoster == self.rosterSignature then
+            self:send("E", a.key, a.parent, a.ruleID, a.context, tostring(a.time), "1")
+        end
+        return
+    end
+    self:send("E", a.key, a.parent, a.ruleID, a.context, tostring(a.time), "0")
     self:send("H", a.key, self.cfg.boot)
     self:publishFact()
     for _, stage in ipairs({"I", "G"}) do
@@ -167,7 +177,7 @@ function Core:broadcast()
 end
 
 function Core:setFact(fact)
-    if not self.active or not labels[fact.state] or type(fact.signature) ~= "string" then return end
+    if not self.active or self.active.started or not labels[fact.state] or type(fact.signature) ~= "string" then return end
     local state, reason = fact.state, fact.reason or "UNKNOWN"
     local previous = self.facts[self.me]
     if previous and previous.state == "N" and state == "U" then state, reason = "N", previous.reason end
@@ -187,7 +197,7 @@ end
 
 function Core:publishFact()
     local f, a = self.localFact, self.active
-    if not f or not a then return end
+    if not f or not a or a.started then return end
     self.sequence = self.sequence + 1
     self:send("F", a.key, self.cfg.boot, tostring(self.sequence), f.state, f.reason, f.signature)
 end
@@ -224,7 +234,7 @@ function Core:rows()
         if row.status == "Unknown" and (not f or fresh) and manual and manual.fingerprint == fingerprint then
             row.status, row.reason, row.source = labels[manual.state], "LEADER_CONFIRMED", "leader"
         end
-        row.allowConfirmation = m.connected and (not f or fresh) and
+        row.allowConfirmation = self.active and not self.active.started and m.connected and (not f or fresh) and
             (row.status == "Unknown" or row.source == "leader") and self.healthy
         row.canConfirm = self.me == self.leader and row.allowConfirmation
         rows[#rows + 1] = row
@@ -240,7 +250,7 @@ function Core:allReady()
 end
 
 function Core:confirm(name, state)
-    if state ~= "R" and state ~= "N" then return false end
+    if not self.active or self.active.started or state ~= "R" and state ~= "N" then return false end
     for _, row in ipairs(self:rows()) do
         if row.name == name and row.canConfirm then
             local fingerprint = self:fingerprint()
@@ -255,7 +265,7 @@ function Core:confirm(name, state)
 end
 
 function Core:confirmFromChat(sender, token, name, state, lineID)
-    if not self.active or sender ~= self.leader or token ~= self:fingerprint() or
+    if not self.active or self.active.started or sender ~= self.leader or token ~= self:fingerprint() or
         (state ~= "R" and state ~= "N") or not self.healthy then return false end
     self.chatLines = self.chatLines or {}
     if lineID and self.chatLines[lineID] then return false end
@@ -272,7 +282,7 @@ function Core:confirmFromChat(sender, token, name, state, lineID)
 end
 
 function Core:chatHelp(sender)
-    if sender ~= self.leader or not self.active or self:owner() ~= self.me or not self.healthy or
+    if sender ~= self.leader or not self.active or self.active.started or self:owner() ~= self.me or not self.healthy or
         self.cfg.now() - (self.lastHelp or -100) < 10 then return end
     self.lastHelp = self.cfg.now()
     pcall(self.cfg.chat, "ZKIR leader: check the player, then /p ZKIR " .. self:fingerprint() ..
@@ -293,13 +303,21 @@ function Core:owner()
     return names[1]
 end
 
+function Core:retire()
+    local a = self.active
+    if not a or a.started then return false end
+    a.started = true
+    a.retiredRoster = (self.count or 0) > 1 and self.rosterSignature or nil
+    self:invalidate()
+    return true
+end
+
 function Core:action(questID, kind)
     local a = self.active
     if not a or a.started then return end
     local rule = NS.Rules[a.ruleID]
     if rule.questID == questID and rule.kind == kind then
-        a.started = true
-        self:invalidate()
+        self:retire()
         self:send("X", a.key)
         self:changed()
     end
@@ -312,14 +330,19 @@ function Core:receive(sender, payload)
     if p[1] ~= "1" then return end
     local kind, a = p[2], self.active
     if kind == "E" then
-        if #p ~= 8 or not NS.Rules[p[5]] or not tonumber(p[7]) or #p[3] > 100 or
+        if #p ~= 8 or not NS.Rules[p[5]] or not tonumber(p[7]) or (p[8] ~= "0" and p[8] ~= "1") or #p[3] > 100 or
             self.saved.retired[p[3]] or math.abs(self.cfg.wall() - tonumber(p[7])) > 1800 then return end
         if a and a.key == p[3] then
             self.restoring = false
-            if p[8] == "1" then a.started = true end
+            if p[8] == "1" and self:retire() then self:changed() end
             return
         end
         local concurrent = a and a.parent == p[4] and a.ruleID == p[5] and a.context == p[6]
+        if concurrent and a.started and a.retiredRoster ~= self.rosterSignature then return end
+        if p[8] == "1" then
+            if not concurrent then return end -- Past actions cannot open or replace a warning.
+            if self:retire() then self:changed() end
+        end
         -- Server time is only a replay bound, never consensus or election ordering.
         local inherited = {}
         if concurrent then
@@ -327,12 +350,14 @@ function Core:receive(sender, payload)
         end
         if not a or self.restoring or not self.healthy or p[4] == a.key or (concurrent and p[3] < a.key) then
             self:adopt({key = p[3], parent = p[4], ruleID = p[5], context = p[6],
-                time = tonumber(p[7]), started = p[8] == "1"})
+                time = tonumber(p[7]), started = p[8] == "1" or concurrent and a.started or false,
+                retiredRoster = concurrent and a.retiredRoster or nil})
             for stage, timestamp in pairs(inherited) do self.saved.ledger[p[3] .. stage] = timestamp end
         end
         return
     end
     if not a or p[3] ~= a.key then return end
+    if a.started and kind ~= "X" and kind ~= "L" then return end
     if kind == "H" and p[4] then
         local old = self.peers[sender]
         if not p[4]:match("^%d+%.?%d*$") or (old and olderBoot(p[4], old.boot)) then return end
@@ -359,8 +384,7 @@ function Core:receive(sender, payload)
             self.manual[p[4]] = {state = p[5], fingerprint = p[6], revision = tonumber(p[7])}
         end
     elseif kind == "X" then
-        a.started = true
-        self:invalidate()
+        self:retire()
     elseif kind == "L" and (p[4] == "I" or p[4] == "G") then
         self.saved.ledger[a.key .. p[4]] = self.cfg.wall()
         if self.saved.claims then self.saved.claims[a.key .. p[4]] = nil end
@@ -383,7 +407,7 @@ end
 function Core:announce(stage)
     local a, now = self.active, self.cfg.now()
     -- Solo presentation must not consume a PARTY announcement slot before a group forms.
-    if not a or (self.count or 0) < 2 or self:owner() ~= self.me or not self.healthy or now - self.stableAt < DISCOVERY or
+    if not a or a.started or (self.count or 0) < 2 or self:owner() ~= self.me or not self.healthy or now - self.stableAt < DISCOVERY or
         now - self.openedAt < DISCOVERY then return end
     local slot = a.key .. stage
     if self.saved.ledger[slot] then return end
@@ -414,6 +438,11 @@ end
 function Core:tick()
     if not self.active then return end
     local now = self.cfg.now()
+    if self.active.started then
+        if now - self.lastPulse >= PULSE then self.lastPulse = now; self:broadcast() end
+        self:changed()
+        return
+    end
     for name, p in pairs(self.peers) do
         if now - p.at > FRESH and not p.expired then
             p.expired = true

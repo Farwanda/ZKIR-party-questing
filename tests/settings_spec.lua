@@ -352,8 +352,9 @@ test("auto FFA adds exactly two options and both default off", function()
         if child.kind == "CheckButton" and descendant(child, f) then checkboxes = checkboxes + 1 end
     end
     expect(checkboxes == 4, "sound and solo plus exactly two loot checkboxes")
-    expect(text(c, f):find("every other party member", 1, true) and text(c, f):find("can be mixed", 1, true),
-        "explain that each other member must match either enabled option")
+    expect(text(c, f):find("every other member", 1, true) and text(c, f):find("either enabled option", 1, true)
+        and text(c, f):find("dungeons use Group Loot", 1, true),
+        "explain dungeon priority and outdoor trust requirements")
     expect(text(c, f):find("Auto FFA is off.", 1, true), "off state is explicit")
     local corrupt = client({db = {settings = {ffaFriends = "true", ffaCharacters = 1}}})
     settings(corrupt)

@@ -229,4 +229,29 @@ test("Alcaz key objective gates coordinated hand-ins without requiring witnesses
     c = client(); c.setQuest(96335); c.event("QUEST_PROGRESS"); c.advance(6)
     assert(c.ns.engine:rows()[1].status == "Unknown")
 end)
+test("completed solo actions stay quiet when joining a party, including after reload", function()
+    for _, kind in ipairs({"accept", "turnin", "gossip"}) do
+        for _, reload in ipairs({false, true}) do
+            local options = {guid = kind == "gossip" and "Creature-0-1-1-1-6669-0001" or nil}
+            local c = client(options)
+            if kind == "accept" then c.event("QUEST_DETAIL")
+            elseif kind == "turnin" then c.setQuest(4201); c.event("QUEST_COMPLETE")
+            else c.event("GOSSIP_SHOW") end
+            c.advance(6)
+            if kind == "accept" then c.event("QUEST_ACCEPTED", 7046)
+            elseif kind == "turnin" then c.event("QUEST_TURNED_IN", 4201)
+            else c.hooks.SelectOptionByIndex(1) end
+            assert(c.ns.engine.active.started and not c.ns.engine:allReady(), "fixture must observe the solo action")
+            c.advance(2)
+            if reload then c = client({db = c.env.ZKIRPartyQuestingDB, guid = options.guid, leader = "party1"}) end
+            c.options.party = true; c.event("GROUP_ROSTER_UPDATE"); c.advance(30)
+            assert(not c.ns.engine:allReady(), "joining cannot revive solo readiness")
+            for _, message in ipairs(c.messages) do
+                assert(not message.chat, "joining after solo " .. kind .. " must not send a late PARTY warning")
+                assert(not message.data or not message.data:match("^1|[EQ]|"),
+                    "old solo event must not be offered to the newly joined party")
+            end
+        end
+    end
+end)
 print("adapter: " .. passed .. " scenario groups passed (mocked APIs/UI)")

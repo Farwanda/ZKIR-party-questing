@@ -6,6 +6,7 @@ NS.AutoLoot = Loot
 local saved, owner, pending, observedMethod, partyGUID
 local lastHome, stableKey, stableSince, failedKey, lastOptions
 local manualEvent, authorityLost, awaitingLeave = false, false, false
+local lastPlace, dungeonFailed
 local restrictionEvents = {}
 local message = "Auto FFA is off."
 local restrictions = {"Combat", "Encounter", "ChallengeMode", "PvPMatch", "Map"}
@@ -48,7 +49,15 @@ end
 local function resetParty()
     owner, pending, stableKey, failedKey, observedMethod, partyGUID = nil, nil, nil, nil, nil, nil
     manualEvent, authorityLost, awaitingLeave = false, false, false
+    lastPlace, dungeonFailed = nil, nil
     saved.hold = nil
+end
+
+local function place()
+    local inside, kind = read(IsInInstance)
+    if inside == true and kind == "party" then return "dungeon" end
+    if inside == false and kind == "none" then return "outdoor" end
+    return nil
 end
 
 local function roster()
@@ -144,6 +153,13 @@ local function masterName(previous, members)
     end
     return nil, false
 end
+local function dungeonResult(confirmed, hold)
+    owner, pending, stableKey = nil, nil, nil
+    dungeonFailed = not confirmed
+    saved.hold = hold or (not confirmed and "interrupted" or nil)
+    if confirmed then message = "Dungeon: Group Loot."
+    else tell("Dungeon Group Loot was not confirmed. Check loot manually; toggle an Auto FFA option to retry.") end
+end
 local function request(kind, target, from, previous, key, members, t)
     local master, valid = masterName(previous, members)
     if kind == "restore" and not valid then
@@ -155,11 +171,13 @@ local function request(kind, target, from, previous, key, members, t)
     -- Authority and state were checked in this tick. Event callbacks only observe.
     local success = read(api("SetLootMethod"), target, kind == "restore" and master or nil)
     if success ~= true then
+        if kind == "dungeon" then dungeonResult(false, previous.hold); return end
         failedKey = key
         pause(kind == "restore" and "interrupted" or "failed", "Loot change was not accepted. Check loot manually; toggle an Auto FFA option to retry.")
         return
     end
-    message = kind == "apply" and "Setting FFA; waiting for confirmation." or "Restoring the previous loot method."
+    message = kind == "dungeon" and "Setting dungeon Group Loot; waiting for confirmation." or
+        (kind == "apply" and "Setting FFA; waiting for confirmation." or "Restoring the previous loot method.")
 end
 local function pollPending(method, masterParty, members, t)
     if not pending then return false end
@@ -173,12 +191,15 @@ local function pollPending(method, masterParty, members, t)
             owner = pending.previous
             saved.hold = "owned"
             message = "FFA confirmed; checking the current party."
+        elseif pending.kind == "dungeon" then
+            dungeonResult(true, pending.previous.hold)
         else
             owner, saved.hold, stableKey = nil, nil, nil
             message = "Previous loot method restored."
         end
         pending = nil
     elseif t >= pending.deadline then
+        if pending.kind == "dungeon" then dungeonResult(false, pending.previous.hold); return true end
         failedKey = pending.key
         local restoration = pending.kind == "restore"
         pause(restoration and "interrupted" or "failed", restoration and
@@ -186,6 +207,34 @@ local function pollPending(method, masterParty, members, t)
             "FFA was not confirmed. Check loot; toggle an Auto FFA option to retry.")
     end
     return true
+end
+
+local function dungeon(state, method, t)
+    stableKey = nil
+    local count, group = read(GetNumSubgroupMembers), enum("Group")
+    if type(count) ~= "number" or count < 1 or count > 4 or count % 1 ~= 0 then
+        message = "Dungeon: waiting for a party of 2-5."; return
+    end
+    if type(method) ~= "number" or type(group) ~= "number" then
+        message = "Dungeon: waiting for loot information."; return
+    end
+    if method == group then
+        owner, dungeonFailed = nil, nil
+        if saved.hold == "owned" then saved.hold = nil end
+        message = "Dungeon: Group Loot."; return
+    end
+    if dungeonFailed then
+        message = "Dungeon Group Loot failed. Check loot manually; toggle an Auto FFA option to retry."; return
+    end
+    local safe, why = idle()
+    if not safe then message = "Dungeon Group Loot pending. " .. why; return end
+    if type(api("SetLootMethod")) ~= "function" or read(api("IsLootMethodAvailable"), group) ~= true then
+        message = "Dungeon Group Loot is unavailable. Check loot manually."; return
+    end
+    -- Group Loot is the dungeon policy, not a temporary FFA baseline to undo.
+    local hold = saved.hold ~= "owned" and saved.hold or nil
+    owner = nil
+    request("dungeon", group, method, {hold = hold}, "dungeon", state.members, t)
 end
 
 function Loot.init(db)
@@ -243,6 +292,7 @@ function Loot.settingsChanged()
     local current = tostring(options().ffaFriends) .. ":" .. tostring(options().ffaCharacters)
     if current ~= lastOptions then
         lastOptions, failedKey, stableKey = current, nil, nil
+        dungeonFailed = nil
         -- Only a deliberate loot-option change resumes a paused policy.
         if not owner and not pending then saved.hold = nil; manualEvent, authorityLost = false, false end
     end
@@ -286,11 +336,13 @@ function Loot.tick()
     local t = now()
     if t == nil then message = "Auto FFA unavailable: game timer is missing."; return end
     local state, reason, home, lostAuthority = context()
+    local location = place()
+    if location and location ~= lastPlace then stableKey, dungeonFailed, lastPlace = nil, nil, location end
     if home == false then
         if lastHome == true or saved.hold then resetParty() end
         lastHome = false
     elseif home == true then lastHome = true end
-    if not enabled() and not owner and not pending then
+    if location ~= "dungeon" and not enabled() and not owner and not pending then
         observedMethod, stableKey, manualEvent, authorityLost = nil, nil, false, false
         message = saved.hold == "interrupted" and "Auto FFA is off. Check party loot manually after the interrupted change." or "Auto FFA is off."
         return
@@ -310,15 +362,20 @@ function Loot.tick()
     if type(method) == "number" then observedMethod = method end
     if not state then
         stableKey = nil
-        if not saved.hold then message = enabled() and reason or "Auto FFA is off." end
+        if not saved.hold then message = (enabled() or location == "dungeon") and reason or "Auto FFA is off." end
         return
+    end
+    -- Finish a request already sent before choosing the current location's policy.
+    if pollPending(method, masterParty, state.members, t) then return end
+    if location == "dungeon" then dungeon(state, method, t); return end
+    if location ~= "outdoor" then
+        stableKey = nil; message = "Waiting for a known outdoor or dungeon location."; return
     end
     if saved.hold == "manual" or saved.hold == "interrupted" then
         message = saved.hold == "manual" and "Paused after a manual loot change. Toggle an Auto FFA option to resume." or
             "Check party loot manually; toggle an Auto FFA option to resume."
         return
     end
-    if pollPending(method, masterParty, state.members, t) then return end
     local ready, evidence = false, "unknown"
     if state.members then ready, evidence = trusted(state.members) end
     ready = ready and enabled()
