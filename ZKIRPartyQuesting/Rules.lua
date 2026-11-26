@@ -1,6 +1,6 @@
 local _, NS = ...
 
--- Curated factual IDs. See research/ESCORT_COVERAGE.md and DUNGEON_AUDIT.md.
+-- Curated factual quest/NPC IDs and action-specific preparation conditions.
 -- PARTY_ACCEPT metadata supports an offer; it does not guarantee delivery or credit.
 local rules = {}
 local function escort(id, npc, title, previous, level, faction, consequence, options)
@@ -38,7 +38,7 @@ escort(5321, 11218, "The Sleeper Has Awakened", nil, 17, "Alliance", "Accepting 
 escort(6482, 12818, "Freedom to Ruul", nil, 19, "Horde", "Accepting starts the escort.")
 escort(7046, 13716, "The Scepter of Celebras", 7044, 41, "Both", "Accepting starts a long ritual.",
     {prerequisiteNames = {[7044] = "Legends of Maraudon"}})
--- Expanded acceptance catalogue; see research/ESCORT_COVERAGE.md for sources and gaps.
+-- Additional acceptance triggers; unknown access conditions remain explicit.
 escort(219, 349, "Missing In Action", nil, 19, "Alliance", "Accepting starts the escort.")
 escort(309, 1379, "Protecting the Shipment", 454, 10, "Alliance", "Accepting starts the escort.")
 escort(435, 1978, "Escorting Erland", nil, 10, "Horde", "Accepting starts the escort.")

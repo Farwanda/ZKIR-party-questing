@@ -13,8 +13,7 @@ for line in toc.read_text().splitlines():
     if line and not line.startswith("#"):
         assert "/" not in line and "\\" not in line and line.endswith(".lua")
         files.append((addon / line, line))
-for name in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "docs/MULTIPLAYER_CHECKLIST.md",
-             "docs/PROTOCOL.md", "docs/AUTO_LOOT.md"):
+for name in ("README.md", "LICENSE", "CHANGELOG.md", "docs/TESTING.md"):
     files.append((root / name, name))
 version = next(line.removeprefix("## Version: ").strip() for line in toc.read_text().splitlines()
                if line.startswith("## Version: "))

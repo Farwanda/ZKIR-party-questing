@@ -2,6 +2,17 @@ local NS = {}
 assert(loadfile("ZKIRPartyQuesting/Messages.lua"))("ZKIR", NS)
 assert(loadfile("ZKIRPartyQuesting/Rules.lua"))("ZKIR", NS)
 assert(loadfile("ZKIRPartyQuesting/Facts.lua"))("ZKIR", NS)
+-- Keep previously supported interactions when reorganizing the catalogue.
+local supported = [[
+a155 a219 a309 g434 a435 a648 a660 a665 a667 a731 a836 a863 a898 a938 a945 a976 a994 a995 a1144
+a1222 a1249 a1270 a1273 a1324 a1393 a1440 a1560 a2742 a2767 a2845 a2904 a3367 a3382 a3525 a3982
+a4121 a4245 a4261 a4322 a4491 a4770 a4901 a4904 a4966 a5203 a5321 a5713 a5821 a5943 a5944 a6132
+a6403 a6482 a6523 a6544 a6641 a7046 g2078 t4201 a452 a87491 a88857 a93125 a93585 a94556 a94927
+a94969 a96204 a96811 a97331 a98430 a99053 a99123 a99144
+]]
+for key in supported:gmatch("%S+") do
+    assert(NS.Rules[key], "missing previously supported interaction " .. key)
+end
 local function prepared(rule)
     local s = {level = 60, space = true, faction = rule.faction == "Both" and "Alliance" or rule.faction,
         classID = rule.classID or 1, raceID = rule.raceIDs and rule.raceIDs[1] or 1, quests = {}}

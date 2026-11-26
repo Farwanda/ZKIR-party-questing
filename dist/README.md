@@ -2,4 +2,4 @@
 
 Use [ZKIRPartyQuesting-1.3.3.zip](ZKIRPartyQuesting-1.3.3.zip). Its SHA-256 checksum is beside it.
 
-[Older releases and development builds](../archive/releases/) are kept separately. Some early development builds have higher-looking version numbers because release numbering was reset to 1.0.
+This is the only install package kept in the current tree. Previous packages remain in Git history. See the [changelog](../CHANGELOG.md) for recent changes.
