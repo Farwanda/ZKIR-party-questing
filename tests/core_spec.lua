@@ -104,6 +104,22 @@ test("2-5 automatic participants / leader only", function()
         local w = World.new(names); w:start(names[size]); w:ready(); w:chatCount(2, A)
     end
 end)
+test("presentation reports evidence and action readiness from the same snapshot", function()
+    local w = World.new({A, B})
+    w.nodes[A].core:detect("a155", "npc"); w:pump(1)
+    local core = w.nodes[A].core
+    local settling = core:presentation()
+    eq(#settling.rows, 2); assert(not settling.ready, "visible evidence must still wait for discovery")
+    w:pump(24)
+    local prepared = core:presentation()
+    assert(prepared.ready); eq(prepared.fingerprint, core:fingerprint())
+    for _, row in ipairs(prepared.rows) do eq(row.status, "Ready") end
+    core:action(155, "accept")
+    local finished = core:presentation()
+    assert(not finished.ready, "a completed preparation cannot show permission to proceed again")
+    for _, row in ipairs(finished.rows) do eq(row.status, "Ready", "ending preparation retains the last evidence") end
+    assert(prepared.ready, "a returned snapshot does not change after later transitions")
+end)
 test("mixed party / waiting / manual provenance", function()
     local w = World.new({A, B, C}, {A, B})
     w.nodes[B].core:detect("a155", "npc"); w:pump(1)

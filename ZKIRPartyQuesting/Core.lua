@@ -56,9 +56,24 @@ function Core:changed()
     if self.cfg.changed then self.cfg.changed(self) end
 end
 
-function Core:invalidate()
+function Core:invalidateReadiness()
     self.manual, self.acknowledgements, self.pending = {}, {}, nil
     self.stableAt = self.cfg.now()
+end
+
+function Core:cancelReconciliation()
+    self.probes = {}
+end
+
+function Core:resetReconciliation()
+    self:cancelReconciliation()
+    self.failedProbes = {}
+end
+
+function Core:suspendSync(notice)
+    self.healthy, self.notice = false, notice
+    self:cancelReconciliation()
+    self:invalidateReadiness()
 end
 
 function Core:setRoster(list)
@@ -74,9 +89,9 @@ function Core:setRoster(list)
     end
     local signature = table.concat(parts, ",")
     if signature ~= self.rosterSignature then
-        self.probes, self.failedProbes = {}, {}
+        self:resetReconciliation()
         if self.active and self.active.retiredRoster ~= signature then self.active.retiredRoster = nil end
-        self:invalidate()
+        self:invalidateReadiness()
         -- A roster that changes away and back must not revive an old signed decision.
         if self.localFact then
             self.factVersion = self.factVersion + 1
@@ -107,10 +122,7 @@ function Core:send(...)
     if #payload > 255 then return false end
     local ok, sent = pcall(self.cfg.send, payload)
     if not ok or sent ~= true then
-        self.healthy = false
-        self.probes = {}
-        self.notice = "WAIT. Party sync failed."
-        self:invalidate()
+        self:suspendSync("WAIT. Party sync failed.")
         return false
     end
     return true
@@ -118,17 +130,28 @@ end
 
 function Core:adopt(a)
     if self.active and self.active.key ~= a.key then
+        -- Saved retired keys reject replaced attempts; active.started instead
+        -- records that preparation ended after an observed action.
         self.saved.retired[self.active.key] = self.cfg.wall()
     end
     self.active = a
     self.restoring = false
-    self.facts, self.peers, self.probes, self.failedProbes = {}, {}, {}, {}
+    self.facts, self.peers = {}, {}
+    self:resetReconciliation()
     self.localFact = nil
     self.openedAt, self.lastPulse = self.cfg.now(), -100
     self.notice = nil
     self.healthy = true
-    self:invalidate()
+    self:invalidateReadiness()
     self:changed()
+end
+
+function Core:startAttempt(ruleID, context)
+    self.serial = self.serial + 1
+    local key = self.cfg.wall() .. "." .. self.cfg.boot .. "." .. self.serial .. "." .. NS.Hash(self.me)
+    self:adopt({key = key, parent = self.active and self.active.key or "0", ruleID = ruleID,
+        context = context, time = self.cfg.wall(), started = false})
+    self:broadcast()
 end
 
 function Core:detect(ruleID, context)
@@ -138,21 +161,12 @@ function Core:detect(ruleID, context)
         self:changed()
         return
     end
-    self.serial = self.serial + 1
-    local key = self.cfg.wall() .. "." .. self.cfg.boot .. "." .. self.serial .. "." .. NS.Hash(self.me)
-    self:adopt({key = key, parent = self.active and self.active.key or "0", ruleID = ruleID,
-        context = context, time = self.cfg.wall(), started = false})
-    self:broadcast()
+    self:startAttempt(ruleID, context)
 end
 
 function Core:retry()
     if not self.active or self.cfg.now() - self.openedAt < DISCOVERY then return false end
-    local a = self.active
-    self.serial = self.serial + 1
-    local key = self.cfg.wall() .. "." .. self.cfg.boot .. "." .. self.serial .. "." .. NS.Hash(self.me)
-    self:adopt({key = key, parent = a.key, ruleID = a.ruleID, context = a.context,
-        time = self.cfg.wall(), started = false})
-    self:broadcast()
+    self:startAttempt(self.active.ruleID, self.active.context)
     return true
 end
 
@@ -187,7 +201,7 @@ function Core:setFact(fact)
     local old = self.localFact
     if not old or old.original ~= fact.signature or old.state ~= state then
         self.factVersion = self.factVersion + 1
-        self:invalidate()
+        self:invalidateReadiness()
     end
     self.localFact = {state = state, reason = reason,
         signature = self.factVersion .. "." .. NS.Hash(fact.signature)}
@@ -215,9 +229,8 @@ function Core:fingerprint()
     return NS.Hash(table.concat(parts, "/"))
 end
 
-function Core:rows()
-    local rows, now = {}, self.cfg.now()
-    local fingerprint = self:fingerprint()
+local function buildRows(self, fingerprint, now)
+    local rows = {}
     for _, name in ipairs(sortedKeys(self.roster)) do
         local m, f = self.roster[name], self.facts[name]
         local fresh = f and (name == self.me or now - f.at <= FRESH)
@@ -245,11 +258,25 @@ function Core:rows()
     return rows
 end
 
-function Core:allReady()
+local function readyForAction(self, rows, now)
     if not self.active or self.active.started or not self.healthy or self.count == 0 then return false end
-    if self.cfg.now() - self.stableAt < DISCOVERY then return false end
-    for _, row in ipairs(self:rows()) do if row.status ~= "Ready" then return false end end
+    if now - self.stableAt < DISCOVERY then return false end
+    for _, row in ipairs(rows) do if row.status ~= "Ready" then return false end end
     return true
+end
+
+function Core:presentation()
+    local fingerprint, now = self:fingerprint(), self.cfg.now()
+    local rows = buildRows(self, fingerprint, now)
+    return {rows = rows, fingerprint = fingerprint, ready = readyForAction(self, rows, now)}
+end
+
+function Core:rows()
+    return self:presentation().rows
+end
+
+function Core:allReady()
+    return self:presentation().ready
 end
 
 function Core:confirm(name, state)
@@ -309,10 +336,10 @@ end
 function Core:retire()
     local a = self.active
     if not a or a.started then return false end
-    a.started = true
+    a.started = true -- Preparation is closed; this is not proof of event credit.
     a.retiredRoster = (self.count or 0) > 1 and self.rosterSignature or nil
-    self.probes = {}
-    self:invalidate()
+    self:cancelReconciliation()
+    self:invalidateReadiness()
     return true
 end
 
@@ -356,57 +383,128 @@ function Core:cancelProbe(key)
     end
 end
 
+local function concurrentAttempt(a, candidate, rosterSignature)
+    return a and a.parent == candidate.parent and a.ruleID == candidate.ruleID and a.context == candidate.context and
+        -- A completed solo/previous-party event is not this party's concurrent alias.
+        (not a.started or a.retiredRoster == rosterSignature)
+end
+
+local function shouldAdoptVerified(self, probe)
+    local a = self.active
+    local needsRecovery = self.restoring or not self.healthy
+    local replacesFinished = a.started and not probe.alias
+    return probe.successor or replacesFinished or needsRecovery or probe.event.key < a.key
+end
+
+function Core:adoptVerified(probe)
+    local a, inherited = self.active, {}
+    if probe.alias then
+        for _, stage in ipairs({"I", "G"}) do inherited[stage] = self.saved.ledger[a.key .. stage] end
+    end
+    probe.event.started = probe.alias and a.started or false
+    probe.event.retiredRoster = probe.event.started and a.retiredRoster or nil
+    self:adopt(probe.event)
+    for stage, timestamp in pairs(inherited) do self.saved.ledger[probe.event.key .. stage] = timestamp end
+end
+
+function Core:receiveReply(sender, p)
+    local key, token, started = p[3], p[4], p[5]
+    local a, probe = self.active, self.probes and self.probes[sender]
+    if #p ~= 5 or (started ~= "0" and started ~= "1") or not a or not probe or
+        key ~= probe.event.key or token ~= probe.token or
+        probe.localKey ~= a.key or self.cfg.now() - probe.at > FRESH then return end
+    self.probes[sender] = nil
+    if started == "1" then
+        if not probe.alias then return end -- A past action cannot open a different event.
+        if self:retire() then self:changed() end
+    end
+    if shouldAdoptVerified(self, probe) then self:adoptVerified(probe) end
+end
+
+function Core:receiveEvent(sender, p)
+    local key, parent, ruleID, context, time, started = p[3], p[4], p[5], p[6], tonumber(p[7]), p[8]
+    if #p ~= 8 or not NS.Rules[ruleID] or not time or (started ~= "0" and started ~= "1") or #key > 100 or
+        self.saved.retired[key] or math.abs(self.cfg.wall() - time) > 1800 then return end
+    local a = self.active
+    if a and a.key == key then
+        self.restoring = false
+        if started == "1" and self:retire() then self:changed() end
+        return
+    end
+    -- Server time is only a replay bound, never consensus or election ordering.
+    local candidate = {key = key, parent = parent, ruleID = ruleID, context = context, time = time, started = false}
+    local concurrent = concurrentAttempt(a, candidate, self.rosterSignature)
+    if started == "1" and not concurrent then return end -- Past actions cannot open or replace a warning.
+    if not a then
+        self:adopt(candidate)
+    elseif not concurrent or started == "1" or key < a.key then
+        self:probe(sender, candidate, concurrent)
+    end
+end
+
+function Core:receiveHeartbeat(sender, boot)
+    local old = self.peers[sender]
+    if not boot:match("^%d+%.?%d*$") or (old and olderBoot(boot, old.boot)) then return end
+    self.retiredBoots = self.retiredBoots or {}
+    self.retiredBoots[sender] = self.retiredBoots[sender] or {}
+    if self.retiredBoots[sender][boot] then return end
+    if not old or old.boot ~= boot or old.expired then
+        if old and old.boot ~= boot then self.retiredBoots[sender][old.boot] = true end
+        self:invalidateReadiness()
+        if not self.facts[sender] or self.facts[sender].state ~= "N" then self.facts[sender] = nil end
+    end
+    self.peers[sender] = {boot = boot, at = self.cfg.now()}
+    self:changed()
+end
+
+function Core:receiveFact(sender, boot, sequence, state, reason, signature)
+    local peer, old = self.peers[sender], self.facts[sender]
+    if not peer or peer.boot ~= boot or (old and old.boot == boot and old.seq >= sequence) then return end
+    if old and old.state == "N" and state == "U" then state, reason = "N", old.reason end
+    if not old or old.signature ~= signature or old.state ~= state then self:invalidateReadiness() end
+    self.facts[sender] = {boot = boot, seq = sequence, state = state, reason = reason,
+        signature = signature, at = self.cfg.now()}
+    self:changed()
+end
+
+function Core:receiveConfirmation(sender, name, state, fingerprint, revision)
+    if sender ~= self.leader or not self.roster[name] or (state ~= "R" and state ~= "N") or
+        fingerprint ~= self:fingerprint() or not revision then return end
+    local old = self.manual[name]
+    if not old or revision > old.revision then
+        self.manual[name] = {state = state, fingerprint = fingerprint, revision = revision}
+    end
+end
+
+function Core:receiveAnnouncement(sender, kind, stage, fingerprint)
+    local a = self.active
+    if kind == "L" and (stage == "I" or stage == "G") then
+        self.saved.ledger[a.key .. stage] = self.cfg.wall()
+        if self.saved.claims then self.saved.claims[a.key .. stage] = nil end
+    elseif kind == "Q" and sender == self:owner() and fingerprint == self:fingerprint() and
+        (stage == "I" or (stage == "G" and self:allReady())) and self.healthy then
+        -- Replicate the at-most-once claim BEFORE the sender attempts party chat.
+        local slot = a.key .. stage
+        if not self.saved.ledger[slot] or self.saved.claims and self.saved.claims[slot] == sender then
+            self.saved.claims = self.saved.claims or {}
+            self.saved.claims[slot] = sender
+            self.saved.ledger[slot] = self.cfg.wall()
+            self:send("K", a.key, stage, fingerprint)
+        end
+    elseif kind == "K" and self.pending and stage == self.pending.stage and fingerprint == self.pending.fingerprint then
+        self.acknowledgements[sender] = true
+    end
+end
+
 function Core:receive(sender, payload)
     if sender == self.me or not self.roster[sender] or not self.roster[sender].connected or
         type(payload) ~= "string" or #payload > 255 then return end
     local p = split(payload)
     if p[1] ~= "1" then return end
     local kind, a = p[2], self.active
-    if kind == "Y" then
-        local probe = self.probes and self.probes[sender]
-        if #p ~= 5 or (p[5] ~= "0" and p[5] ~= "1") or not a or not probe or
-            p[3] ~= probe.event.key or p[4] ~= probe.token or
-            probe.localKey ~= a.key or self.cfg.now() - probe.at > FRESH then return end
-        self.probes[sender] = nil
-        if p[5] == "1" then
-            if not probe.alias then return end -- A past action cannot open a different event.
-            if self:retire() then self:changed() end
-        end
-        if probe.successor or (a.started and not probe.alias) or self.restoring or not self.healthy or p[3] < a.key then
-            local inherited = {}
-            if probe.alias then
-                for _, stage in ipairs({"I", "G"}) do inherited[stage] = self.saved.ledger[a.key .. stage] end
-            end
-            probe.event.started = probe.alias and a.started or false
-            probe.event.retiredRoster = probe.event.started and a.retiredRoster or nil
-            self:adopt(probe.event)
-            for stage, timestamp in pairs(inherited) do self.saved.ledger[p[3] .. stage] = timestamp end
-        end
-        return
-    end
+    if kind == "Y" then return self:receiveReply(sender, p) end
     if kind == "X" and #p == 3 then self:cancelProbe(p[3]) end
-    if kind == "E" then
-        if #p ~= 8 or not NS.Rules[p[5]] or not tonumber(p[7]) or (p[8] ~= "0" and p[8] ~= "1") or #p[3] > 100 or
-            self.saved.retired[p[3]] or math.abs(self.cfg.wall() - tonumber(p[7])) > 1800 then return end
-        if a and a.key == p[3] then
-            self.restoring = false
-            if p[8] == "1" and self:retire() then self:changed() end
-            return
-        end
-        local concurrent = a and a.parent == p[4] and a.ruleID == p[5] and a.context == p[6]
-        -- A completed solo/previous-party event is not this party's concurrent alias.
-        if concurrent and a.started and a.retiredRoster ~= self.rosterSignature then concurrent = false end
-        if p[8] == "1" and not concurrent then return end -- Past actions cannot open or replace a warning.
-        -- Server time is only a replay bound, never consensus or election ordering.
-        local candidate = {key = p[3], parent = p[4], ruleID = p[5], context = p[6],
-            time = tonumber(p[7]), started = false}
-        if not a then
-            self:adopt(candidate)
-        elseif not concurrent or p[8] == "1" or p[3] < a.key then
-            self:probe(sender, candidate, concurrent)
-        end
-        return
-    end
+    if kind == "E" then return self:receiveEvent(sender, p) end
     if not a or p[3] ~= a.key then return end
     if kind == "V" and #p == 4 then
         if not a.started or a.retiredRoster == self.rosterSignature then
@@ -416,47 +514,15 @@ function Core:receive(sender, payload)
     end
     if a.started and kind ~= "X" and kind ~= "L" then return end
     if kind == "H" and p[4] then
-        local old = self.peers[sender]
-        if not p[4]:match("^%d+%.?%d*$") or (old and olderBoot(p[4], old.boot)) then return end
-        self.retiredBoots = self.retiredBoots or {}
-        self.retiredBoots[sender] = self.retiredBoots[sender] or {}
-        if self.retiredBoots[sender][p[4]] then return end
-        if not old or old.boot ~= p[4] or old.expired then
-            if old and old.boot ~= p[4] then self.retiredBoots[sender][old.boot] = true end
-            self:invalidate()
-            if not self.facts[sender] or self.facts[sender].state ~= "N" then self.facts[sender] = nil end
-        end
-        self.peers[sender] = {boot = p[4], at = self.cfg.now()}
+        return self:receiveHeartbeat(sender, p[4])
     elseif kind == "F" and labels[p[6]] and p[7] and p[8] and tonumber(p[5]) then
-        local peer, old = self.peers[sender], self.facts[sender]
-        if not peer or peer.boot ~= p[4] or (old and old.boot == p[4] and old.seq >= tonumber(p[5])) then return end
-        if old and old.state == "N" and p[6] == "U" then p[6], p[7] = "N", old.reason end
-        if not old or old.signature ~= p[8] or old.state ~= p[6] then self:invalidate() end
-        self.facts[sender] = {boot = p[4], seq = tonumber(p[5]), state = p[6], reason = p[7],
-            signature = p[8], at = self.cfg.now()}
-    elseif kind == "M" and sender == self.leader and self.roster[p[4]] and
-        (p[5] == "R" or p[5] == "N") and p[6] == self:fingerprint() and tonumber(p[7]) then
-        local old = self.manual[p[4]]
-        if not old or tonumber(p[7]) > old.revision then
-            self.manual[p[4]] = {state = p[5], fingerprint = p[6], revision = tonumber(p[7])}
-        end
+        return self:receiveFact(sender, p[4], tonumber(p[5]), p[6], p[7], p[8])
+    elseif kind == "M" then
+        self:receiveConfirmation(sender, p[4], p[5], p[6], tonumber(p[7]))
     elseif kind == "X" then
         self:retire()
-    elseif kind == "L" and (p[4] == "I" or p[4] == "G") then
-        self.saved.ledger[a.key .. p[4]] = self.cfg.wall()
-        if self.saved.claims then self.saved.claims[a.key .. p[4]] = nil end
-    elseif kind == "Q" and sender == self:owner() and p[5] == self:fingerprint() and
-        (p[4] == "I" or (p[4] == "G" and self:allReady())) and self.healthy then
-        -- Replicate the at-most-once claim BEFORE the sender attempts party chat.
-        local slot = a.key .. p[4]
-        if not self.saved.ledger[slot] or self.saved.claims and self.saved.claims[slot] == sender then
-            self.saved.claims = self.saved.claims or {}
-            self.saved.claims[slot] = sender
-            self.saved.ledger[slot] = self.cfg.wall()
-            self:send("K", a.key, p[4], p[5])
-        end
-    elseif kind == "K" and self.pending and p[4] == self.pending.stage and p[5] == self.pending.fingerprint then
-        self.acknowledgements[sender] = true
+    elseif kind == "L" or kind == "Q" or kind == "K" then
+        self:receiveAnnouncement(sender, kind, p[4], p[5])
     end
     self:changed()
 end
@@ -503,10 +569,7 @@ function Core:tick()
     for name, p in pairs(self.peers) do
         if now - p.at > FRESH and not p.expired then
             p.expired = true
-            self:invalidate()
-            self.healthy = false
-            self.probes = {}
-            self.notice = "WAIT. An addon stopped responding. Reconnect, then /zkir retry."
+            self:suspendSync("WAIT. An addon stopped responding. Reconnect, then /zkir retry.")
         end
     end
     if now - self.lastPulse >= PULSE then

@@ -88,13 +88,9 @@ local function showCharacters()
         characterError:SetHeight(32)
         characterError:SetTextColor(1, 0.4, 0.35)
         local save = button("Save", 92, function()
-            if not NS.AutoLoot or type(NS.AutoLoot.setCharacters) ~= "function" then
-                characterError:SetText("Character settings are unavailable. Please try again.")
-                return
-            end
-            local ok, saved, message = pcall(NS.AutoLoot.setCharacters, characterText:GetText())
-            if not ok or not saved then
-                characterError:SetText(ok and type(message) == "string" and message or "Could not save the character list.")
+            local saved, message = NS.AutoLoot.setCharacters(characterText:GetText())
+            if not saved then
+                characterError:SetText(message)
                 return
             end
             charactersFrame:Hide()
@@ -104,12 +100,7 @@ local function showCharacters()
         local cancel = button("Cancel", 92, function() charactersFrame:Hide() end, charactersFrame)
         cancel:SetPoint("BOTTOMRIGHT", -14, 14)
     end
-    local text = ""
-    if NS.AutoLoot and type(NS.AutoLoot.charactersText) == "function" then
-        local ok, value = pcall(NS.AutoLoot.charactersText)
-        if ok and type(value) == "string" then text = value end
-    end
-    characterText:SetText(text)
+    characterText:SetText(NS.AutoLoot.charactersText())
     characterText:SetCursorPosition(0)
     characterError:SetText("")
     charactersFrame:SetScale(Settings.sizeScale())
@@ -140,11 +131,11 @@ local function create()
         sizeButtons[choice]:SetPoint("TOPLEFT", 112 + (index - 1) * 75, -158)
     end
     local preview = button("Preview warning", 160, function()
-        if NS.UI then NS.UI.preview() end
+        NS.UI.preview()
     end)
     preview:SetPoint("TOPLEFT", 14, -199)
     local reset = button("Reset window position", 160, function()
-        if NS.UI then NS.UI.resetPosition() else Settings.resetPosition() end
+        NS.UI.resetPosition()
     end)
     reset:SetPoint("TOPLEFT", 184, -199)
     label(frame, 14, -241, 332):SetText("|cffffd160Free for All outside dungeons|r")
@@ -176,18 +167,8 @@ end
 function Settings.refresh(force)
     if not frame or not force and not frame:IsShown() then return end
     local version = type(callbacks.version) == "string" and callbacks.version or "unknown"
-    local message = "Waiting for a supported interaction."
-    if type(callbacks.status) == "function" then
-        local ok, value = pcall(callbacks.status)
-        message = ok and type(value) == "string" and value or "Status unavailable."
-    end
-    local lootMessage = "Auto FFA is off."
-    if NS.AutoLoot and type(NS.AutoLoot.status) == "function" then
-        local ok, value = pcall(NS.AutoLoot.status)
-        lootMessage = ok and type(value) == "string" and value or "Auto FFA is unavailable."
-    elseif Settings.values.ffaFriends or Settings.values.ffaCharacters then
-        lootMessage = "Auto FFA is unavailable."
-    end
+    local message = callbacks.status and callbacks.status() or "Waiting for a supported interaction."
+    local lootMessage = NS.AutoLoot.status()
     local values = Settings.values
     local signature = table.concat({version, message, lootMessage, tostring(values.sound), tostring(values.solo),
         values.size, tostring(values.ffaFriends), tostring(values.ffaCharacters)}, "\031")

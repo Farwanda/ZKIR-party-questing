@@ -451,9 +451,10 @@ test("loot status refreshes without overwriting an open character draft", functi
     c.ns.Settings.refresh()
     expect(text(c, f):find("Waiting until the party is out of combat.", 1, true), "show the runtime's current loot status")
     expect(editor:IsShown() and input:GetText() == "Unsubmitted-Realm", "status updates preserve the user's editor draft")
-    c.ns.AutoLoot.status = function() error("unavailable") end
-    c.ns.Settings.refresh()
-    expect(text(c, f):find("Auto FFA is unavailable.", 1, true), "status failure is explicit and does not break settings")
+    c.ns.AutoLoot.status = function() error("broken internal status") end
+    local ok, err = pcall(c.ns.Settings.refresh)
+    expect(not ok and tostring(err):find("broken internal status", 1, true),
+        "internal programming errors must reach the game error handler")
     expect(input:GetText() == "Unsubmitted-Realm" and next(c.ns.Settings.values.ffaNames) == nil,
         "status failures neither replace nor save the draft")
 end)

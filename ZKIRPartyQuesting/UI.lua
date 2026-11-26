@@ -11,7 +11,7 @@ local function defaultPosition(window)
     window:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
 end
 local function scale()
-    return NS.Settings and NS.Settings.sizeScale() or 1
+    return NS.Settings.sizeScale()
 end
 local function attemptID(active)
     -- Concurrent detections converge on a different key but share these fields.
@@ -151,9 +151,8 @@ local function shortNames(data)
     return names
 end
 
-render = function(p, view)
-    p.view = view
-    local rule, data, names = view.rule, view.rows, shortNames(view.rows)
+local function instructions(view, names, preview)
+    local rule, data = view.rule, view.rows
     local instruction, consequence, footer = NS.Messages.instruction(rule), NS.Messages.consequence(rule), ""
     if view.started then
         instruction = rule.kind == "gossip" and "CHOICE MADE." or "ACTION TAKEN."
@@ -168,14 +167,53 @@ render = function(p, view)
         footer = #waiting == 1 and ("Waiting for " .. waiting[1] .. ".") or
             (#waiting == 0 and "Checking..." or ("Waiting — " .. ready .. "/" .. #data .. " ready."))
     end
-    if p.preview then footer = "Local preview. Sample players." end
+    if preview then footer = "Local preview. Sample players." end
+    return instruction, consequence, footer
+end
+
+local function placeRow(row, entry, name, reason, y, selected)
+    row.name:Hide(); row.status:Hide(); row.detail:Hide(); row.hover:Hide()
+    if row.check then row.check:Hide(); row.yes:Hide(); row.no:Hide() end
+    row.entry = entry
+    if not entry then return y end
+    local top = y
+    local status = entry.status .. (entry.source == "leader" and " · Leader" or "")
+    local height = math.max(place(row.name, name, INSET, y, 146),
+        place(row.status, status, 166, y, 160))
+    row.status:SetTextColor(unpack(colors[entry.status] or colors.Unknown))
+    row.hover:ClearAllPoints(); row.hover:SetPoint("TOPLEFT", INSET, -y)
+    row.hover:SetSize(312, height); row.hover:Show()
+    y = y + height + 3
+    local actionable = entry.status == "Not Ready" or entry.status == "Unknown"
+    if actionable or entry.canConfirm then
+        local detailHeight = place(row.detail, actionable and reason or "", INSET, y, entry.canConfirm and 244 or 312)
+        row.detail:SetTextColor(0.8, 0.8, 0.8)
+        if entry.canConfirm and row.check then
+            row.check:ClearAllPoints(); row.check:SetPoint("TOPRIGHT", -INSET, -y + 2); row.check:Show()
+            detailHeight = math.max(detailHeight, 20)
+        end
+        y = y + detailHeight + 3
+    end
+    if entry.canConfirm and row.check and selected == entry.name then
+        row.yes:ClearAllPoints(); row.yes:SetPoint("TOPLEFT", INSET, -y); row.yes:Show()
+        row.no:ClearAllPoints(); row.no:SetPoint("TOPLEFT", INSET + 68, -y); row.no:Show()
+        y = y + 24
+    end
+    return math.max(y, top + 20) + 5
+end
+
+render = function(p, view)
+    p.view = view
+    local rule, data, names = view.rule, view.rows, shortNames(view.rows)
+    local instruction, consequence, footer = instructions(view, names, p.preview)
     local details = NS.Messages.details(rule)
+    local reasons = {}
     local parts = {view.title, instruction, consequence, footer, details, tostring(p.expanded), p.selected or "",
         view.attempt or "", view.fingerprint or ""}
     for _, entry in ipairs(data) do
+        reasons[entry.name] = NS.Messages.reason(entry.reason, rule, NS.QuestTitle)
         parts[#parts + 1] = table.concat({entry.name, entry.status, entry.source or "",
-            NS.Messages.reason(entry.reason, rule, NS.QuestTitle),
-            tostring(entry.canConfirm)}, "\031")
+            reasons[entry.name], tostring(entry.canConfirm)}, "\031")
     end
     local signature = table.concat(parts, "\030")
     position(p)
@@ -187,37 +225,8 @@ render = function(p, view)
     p.consequence:Hide()
     if consequence ~= "" then y = y + place(p.consequence, consequence, INSET, y, 312) + 10 end
     for i, row in ipairs(p.rows) do
-        row.name:Hide(); row.status:Hide(); row.detail:Hide(); row.hover:Hide()
-        if row.check then row.check:Hide(); row.yes:Hide(); row.no:Hide() end
         local entry = not view.started and data[i] or nil
-        row.entry = entry
-        if entry then
-            local top = y
-            local status = entry.status .. (entry.source == "leader" and " · Leader" or "")
-            local height = math.max(place(row.name, names[entry.name], INSET, y, 146),
-                place(row.status, status, 166, y, 160))
-            row.status:SetTextColor(unpack(colors[entry.status] or colors.Unknown))
-            row.hover:ClearAllPoints(); row.hover:SetPoint("TOPLEFT", INSET, -y)
-            row.hover:SetSize(312, height); row.hover:Show()
-            y = y + height + 3
-            local actionable = entry.status == "Not Ready" or entry.status == "Unknown"
-            if actionable or entry.canConfirm then
-                local reason = actionable and NS.Messages.reason(entry.reason, rule, NS.QuestTitle) or ""
-                local detailHeight = place(row.detail, reason, INSET, y, entry.canConfirm and 244 or 312)
-                row.detail:SetTextColor(0.8, 0.8, 0.8)
-                if entry.canConfirm and row.check then
-                    row.check:ClearAllPoints(); row.check:SetPoint("TOPRIGHT", -INSET, -y + 2); row.check:Show()
-                    detailHeight = math.max(detailHeight, 20)
-                end
-                y = y + detailHeight + 3
-            end
-            if entry.canConfirm and row.check and p.selected == entry.name then
-                row.yes:ClearAllPoints(); row.yes:SetPoint("TOPLEFT", INSET, -y); row.yes:Show()
-                row.no:ClearAllPoints(); row.no:SetPoint("TOPLEFT", INSET + 68, -y); row.no:Show()
-                y = y + 24
-            end
-            y = math.max(y, top + 20) + 5
-        end
+        y = placeRow(row, entry, entry and names[entry.name], entry and reasons[entry.name], y, p.selected)
     end
     y = y + 4
     p.footer:Hide()
@@ -231,18 +240,18 @@ render = function(p, view)
 end
 function UI.update(engine, presentationOnly)
     UI.engine = engine
-    local options = NS.Settings and NS.Settings.values or {}
+    local options = NS.Settings.values
     UI.lastSolo = options.solo ~= false
     if not engine or not engine.active then if panel then panel.frame:Hide() end; return end
     if not panel then panel = create("ZKIRPartyQuestingWindow") end
     local frame = panel.frame
-    local a, data = engine.active, engine:rows()
+    local a, snapshot = engine.active, engine:presentation()
     local attempt = attemptID(a)
     local firstObservation = not observedAttempts[attempt]
     observedAttempts[attempt] = true
-    local rule, fingerprint = NS.Rules[a.ruleID], engine:fingerprint()
+    local rule, fingerprint = NS.Rules[a.ruleID], snapshot.fingerprint
     if panel.attempt ~= attempt or panel.fingerprint ~= fingerprint then panel.selected = nil end
-    render(panel, {rule = rule, rows = data, title = rule.title, ready = engine:allReady(),
+    render(panel, {rule = rule, rows = snapshot.rows, title = rule.title, ready = snapshot.ready,
         notice = engine.notice, started = a.started, attempt = attempt, fingerprint = fingerprint})
     local soloHidden = engine.count == 1 and options.solo == false and UI.forcedAttempt ~= attempt
     local becomingVisible = firstObservation or UI.soloSuppressedAttempt == attempt
@@ -267,7 +276,7 @@ function UI.show(engine)
     if panel and engine and engine.active then panel.frame:Raise() end
 end
 function UI.applySettings()
-    if NS.Settings and NS.Settings.values.solo == false and UI.lastSolo == true then
+    if NS.Settings.values.solo == false and UI.lastSolo == true then
         UI.forcedAttempt = nil
     end
     if panel then panel.frame:SetScale(scale()); panel.signature = nil end
@@ -287,7 +296,7 @@ function UI.resetPosition()
         defaultPosition(p.frame)
         position(p)
     end
-    if NS.Settings then NS.Settings.resetPosition() end
+    NS.Settings.resetPosition()
 end
 function UI.preview()
     if not previewPanel then previewPanel = create("ZKIRPartyQuestingPreviewWindow", true) end
