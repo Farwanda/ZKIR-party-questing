@@ -2,7 +2,7 @@ local ADDON, NS = ...
 local PREFIX = "ZKIRPQ1"
 local engine, registered, elapsed = nil, false, 0
 local batchDepth, renderPending = 0, false
-local questDialog, gossipDialog
+local questDialog, gossipDialog, displayedGossip
 local hookedFrames = {}
 
 local public, call = NS.API.public, NS.API.read
@@ -121,6 +121,22 @@ local function npc()
     if kind ~= "Creature" and kind ~= "Vehicle" then return nil, nil end
     return guid, tonumber(id)
 end
+local function gossipOptions()
+    -- Public IDs distinguish offered actions across locales. Their presence or
+    -- change proves neither an event stage nor which choice starts the event.
+    local options = call(C_GossipInfo and C_GossipInfo.GetOptions)
+    if type(options) ~= "table" then return end
+    local ids, byIndex, sorted = {}, {}, {}
+    for _, option in ipairs(options) do
+        local id, index = NS.API.field(option, "gossipOptionID"), NS.API.field(option, "orderIndex")
+        if type(id) ~= "number" or id < 0 or id % 1 ~= 0 or ids[id] then return end
+        ids[id], sorted[#sorted + 1] = true, id
+        if type(index) == "number" and index >= 0 and index % 1 == 0 then byIndex[index] = id end
+    end
+    if #sorted == 0 then return end
+    table.sort(sorted)
+    return ids, byIndex, NS.Hash(table.concat(sorted, ","))
+end
 local function refreshAnchor()
     -- Native panels may appear after our event handler, or be loaded later.
     for _, panel in pairs({quest = QuestFrame, gossip = GossipFrame}) do
@@ -141,7 +157,8 @@ local function refreshAnchor()
             rule.kind ~= "gossip" and questDialog.questID == rule.questID and
             QuestFrame and call(QuestFrame.IsShown, QuestFrame) == true then
             anchor = QuestFrame
-        elseif gossipDialog and gossipDialog.guid == active.context and guid == gossipDialog.guid and
+        elseif gossipDialog and (rule.kind == "gossip" and gossipDialog.context or gossipDialog.guid) == active.context and
+            guid == gossipDialog.guid and
             GossipFrame and call(GossipFrame.IsShown, GossipFrame) == true and
             (rule.kind == "gossip" and rule.npcID == gossipDialog.npcID or
              rule.kind == "accept" and gossipDialog.offers[rule.questID]) then
@@ -166,7 +183,20 @@ local function detect(kind, questID)
             (not rule.afterQuestID or quest(rule.afterQuestID).rewarded ~= false) and
             ((kind == "gossip" and rule.npcID == npcID) or
             (kind ~= "gossip" and rule.questID == questID)) then
-            engine:detect(id, guid or "unknown")
+            local context = guid or "unknown"
+            if kind == "gossip" and gossipDialog then
+                local bare = engine.active and engine.active.ruleID == id and engine.active.context == context
+                if gossipDialog.stage and (not bare or gossipDialog.previousStage and
+                    gossipDialog.previousStage ~= gossipDialog.stage) then
+                    context = context .. ":g" .. gossipDialog.stage
+                elseif engine.active and engine.active.ruleID == id and
+                    engine.active.context:match("^(.-):g%d+$") == guid then
+                    -- Missing IDs are not evidence that another stage has begun.
+                    context = engine.active.context
+                end
+                gossipDialog.context = context
+            end
+            engine:detect(id, context)
             evaluate()
             return
         end
@@ -218,7 +248,7 @@ for _, event in ipairs({"PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "GROUP_ROSTER_U
     pcall(driver.RegisterEvent, driver, event)
 end
 local function handleEvent(event, ...)
-    if event == "PLAYER_ENTERING_WORLD" then questDialog, gossipDialog = nil, nil end
+    if event == "PLAYER_ENTERING_WORLD" then questDialog, gossipDialog, displayedGossip = nil, nil, nil end
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then start(); roster() end
     NS.AutoLoot.event(event, ...)
     if not engine then return end
@@ -242,8 +272,16 @@ local function handleEvent(event, ...)
         detect(event == "QUEST_DETAIL" and "accept" or "turnin", questDialog.questID)
     elseif event == "GOSSIP_SHOW" then
         local guid, npcID = npc()
+        local previous = gossipDialog
         gossipDialog = {guid = guid, npcID = npcID, offers = {}}
+        gossipDialog.ids, gossipDialog.byIndex, gossipDialog.stage = gossipOptions()
+        -- The first available IDs only establish a baseline for an existing
+        -- unidentified menu. Information becoming available is not a new choice.
+        if previous and previous.guid == guid then
+            gossipDialog.previousStage = previous.stage or previous.previousStage
+        end
         detect("gossip")
+        if not displayedGossip then displayedGossip = gossipDialog end
         local offers = call(C_GossipInfo and C_GossipInfo.GetAvailableQuests)
         local upcoming, seen = {}, {}
         if type(offers) == "table" then
@@ -283,6 +321,9 @@ driver:SetScript("OnEvent", function(_, event, ...)
     if batchDepth == 0 then present() end
 end)
 driver:SetScript("OnUpdate", function(_, delta)
+    -- A synchronous GOSSIP_SHOW can run inside the native selection call.
+    -- Its post-hook must still refer to the menu displayed before that call.
+    displayedGossip = gossipDialog
     elapsed = elapsed + delta
     if elapsed < 0.5 then return end
     elapsed = 0
@@ -292,19 +333,28 @@ driver:SetScript("OnUpdate", function(_, delta)
     batchDepth = batchDepth - 1
     if batchDepth == 0 then present() end
 end)
--- Observation only, after the ordinary control runs. No guessed gossip option IDs.
+-- Observe public option identities, without assigning them guessed event meanings.
 if type(hooksecurefunc) == "function" and C_GossipInfo then
-    local function selected()
-        if not engine or not engine.active or not gossipDialog then return end
+    local function selected(method, option)
+        local dialog = displayedGossip
+        if not engine or not engine.active or not dialog or not public(option) then return end
+        if gossipDialog and gossipDialog.guid ~= dialog.guid then return end
         local rule = NS.Rules[engine.active.ruleID]
         -- The native selection can close the panel and clear UnitGUID("npc")
         -- before this post-hook. Use the captured interaction for that callback.
-        if gossipDialog.closedAt and now() - gossipDialog.closedAt > 1 then return end
-        if rule.kind == "gossip" and rule.npcID == gossipDialog.npcID and
-            engine.active.context == gossipDialog.guid then engine:action(rule.questID, "gossip") end
+        if dialog.closedAt and now() - dialog.closedAt > 1 then return end
+        if dialog.ids then
+            local id = option
+            if method == "SelectOptionByIndex" then id = dialog.byIndex[option] end
+            if not dialog.ids[id] then return end
+        end
+        if rule.kind == "gossip" and rule.npcID == dialog.npcID and
+            engine.active.context == dialog.context then engine:action(rule.questID, "gossip") end
     end
     for _, method in ipairs({"SelectOption", "SelectOptionByIndex"}) do
-        if type(C_GossipInfo[method]) == "function" then pcall(hooksecurefunc, C_GossipInfo, method, selected) end
+        if type(C_GossipInfo[method]) == "function" then
+            pcall(hooksecurefunc, C_GossipInfo, method, function(...) selected(method, ...) end)
+        end
     end
 end
 SLASH_ZKIRPARTYQUESTING1 = "/zkir"

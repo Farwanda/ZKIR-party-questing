@@ -2,7 +2,7 @@
 
 Open `/zkir`. **With Battle.net friends** and **With these characters** control outdoor FFA. They are independent, per-character options, both off by default. Every other member must match at least one enabled option; one friend does not authorize FFA for a party containing strangers. The leader is excluded from the friendship check. Other members do not need the addon. Ordinary dungeon parties use Group Loot instead, regardless of these options.
 
-**Characters...** accepts up to 100 distinct names, one `Name-Realm` per line. A bare name expands to the current realm. Realm spaces are normalized, names are stored as lowercase keys, and matching includes the realm. Saving does not enable the option. Invalid input leaves the old list intact; Cancel/Escape discards edits.
+**Characters...** accepts up to 100 distinct names, one `Name-Realm` per line. A bare name expands to the current realm. Realm spaces are normalized and matching includes the realm. The game's UTF-8 comparison handles accented and Cyrillic capitalization, including previously saved names. If that API is unavailable, use exact capitalization for non-ASCII letters; missing comparison evidence never grants trust. Saving does not enable the option. Invalid input leaves the old list intact; Cancel/Escape discards edits.
 
 ## Outdoor FFA
 
@@ -44,6 +44,7 @@ API reference checked against the Forever branch of Blizzard's generated UI docu
 - [PartyInfo](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/PartyInfoDocumentation.lua): enum-based loot methods, availability, setter result and party lifecycle events.
 - [Instance](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/InstanceDocumentation.lua): `IsInInstance` returns the instance-presence boolean and instance-type string used for location checks.
 - [BattleNet](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/BattleNetDocumentation.lua): account lookup by player GUID and friendship evidence.
+- [Communities member list](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_Communities/CommunitiesMemberList.lua): native `strcmputf8i` comparison of member strings. Unicode matching in this release is simulated; the native result still needs a field check.
 - [RestrictedActions](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/RestrictedActionsDocumentation.lua): restriction state and events; both activating and active states defer changes.
 
 Development logging, diagnostic commands, and probe controls are absent from this release. Old diagnostic SavedVariables are discarded on load, retaining only a manual-review warning for an unfinished probe. The user-supplied `log.txt` is excluded from Git and the install ZIP. Character settings and small recovery markers stay in this character's SavedVariables; no BattleTags or friend-account identifiers are stored by this feature.

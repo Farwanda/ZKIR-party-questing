@@ -74,6 +74,7 @@ function Core:setRoster(list)
     end
     local signature = table.concat(parts, ",")
     if signature ~= self.rosterSignature then
+        self.probes, self.failedProbes = {}, {}
         if self.active and self.active.retiredRoster ~= signature then self.active.retiredRoster = nil end
         self:invalidate()
         -- A roster that changes away and back must not revive an old signed decision.
@@ -96,7 +97,8 @@ end
 
 function Core:send(...)
     if self.count == 1 then return true end
-    if not self.healthy then return false end
+    -- A new attempt may verify recovery once; ordinary traffic stays suspended.
+    if not self.healthy and select(1, ...) ~= "V" then return false end
     local parts = {"1", ...}
     for i, part in ipairs(parts) do
         if type(part) ~= "string" or part:find("[|\r\n]") then return false end
@@ -106,6 +108,7 @@ function Core:send(...)
     local ok, sent = pcall(self.cfg.send, payload)
     if not ok or sent ~= true then
         self.healthy = false
+        self.probes = {}
         self.notice = "WAIT. Party sync failed."
         self:invalidate()
         return false
@@ -119,7 +122,7 @@ function Core:adopt(a)
     end
     self.active = a
     self.restoring = false
-    self.facts, self.peers = {}, {}
+    self.facts, self.peers, self.probes, self.failedProbes = {}, {}, {}, {}
     self.localFact = nil
     self.openedAt, self.lastPulse = self.cfg.now(), -100
     self.notice = nil
@@ -308,6 +311,7 @@ function Core:retire()
     if not a or a.started then return false end
     a.started = true
     a.retiredRoster = (self.count or 0) > 1 and self.rosterSignature or nil
+    self.probes = {}
     self:invalidate()
     return true
 end
@@ -323,12 +327,64 @@ function Core:action(questID, kind)
     end
 end
 
+function Core:probe(sender, candidate, alias)
+    -- Different local histories need a live answer, not trust in an old E packet.
+    self.probes = self.probes or {}
+    self.failedProbes = self.failedProbes or {}
+    local failureKey = sender .. ":" .. candidate.key
+    if self.failedProbes[failureKey] then return end
+    local probe, now = self.probes[sender], self.cfg.now()
+    if not probe or probe.event.key ~= candidate.key or now - probe.at > FRESH then
+        self.probeSequence = (self.probeSequence or 0) + 1
+        probe = {event = candidate, alias = alias, localKey = self.active.key, at = now,
+            successor = candidate.parent == self.active.key,
+            token = self.cfg.boot .. "." .. self.probeSequence, sentAt = -100}
+        self.probes[sender] = probe
+    end
+    if now - probe.sentAt >= PULSE then
+        probe.sentAt = now
+        if not self:send("V", candidate.key, probe.token) then self.failedProbes[failureKey] = true end
+    end
+end
+
+function Core:cancelProbe(key)
+    for name, probe in pairs(self.probes or {}) do
+        if probe.event.key == key then
+            self.probes[name] = nil
+            if not probe.alias then self.saved.retired[key] = self.cfg.wall() end
+        end
+    end
+end
+
 function Core:receive(sender, payload)
     if sender == self.me or not self.roster[sender] or not self.roster[sender].connected or
         type(payload) ~= "string" or #payload > 255 then return end
     local p = split(payload)
     if p[1] ~= "1" then return end
     local kind, a = p[2], self.active
+    if kind == "Y" then
+        local probe = self.probes and self.probes[sender]
+        if #p ~= 5 or (p[5] ~= "0" and p[5] ~= "1") or not a or not probe or
+            p[3] ~= probe.event.key or p[4] ~= probe.token or
+            probe.localKey ~= a.key or self.cfg.now() - probe.at > FRESH then return end
+        self.probes[sender] = nil
+        if p[5] == "1" then
+            if not probe.alias then return end -- A past action cannot open a different event.
+            if self:retire() then self:changed() end
+        end
+        if probe.successor or (a.started and not probe.alias) or self.restoring or not self.healthy or p[3] < a.key then
+            local inherited = {}
+            if probe.alias then
+                for _, stage in ipairs({"I", "G"}) do inherited[stage] = self.saved.ledger[a.key .. stage] end
+            end
+            probe.event.started = probe.alias and a.started or false
+            probe.event.retiredRoster = probe.event.started and a.retiredRoster or nil
+            self:adopt(probe.event)
+            for stage, timestamp in pairs(inherited) do self.saved.ledger[p[3] .. stage] = timestamp end
+        end
+        return
+    end
+    if kind == "X" and #p == 3 then self:cancelProbe(p[3]) end
     if kind == "E" then
         if #p ~= 8 or not NS.Rules[p[5]] or not tonumber(p[7]) or (p[8] ~= "0" and p[8] ~= "1") or #p[3] > 100 or
             self.saved.retired[p[3]] or math.abs(self.cfg.wall() - tonumber(p[7])) > 1800 then return end
@@ -338,25 +394,26 @@ function Core:receive(sender, payload)
             return
         end
         local concurrent = a and a.parent == p[4] and a.ruleID == p[5] and a.context == p[6]
-        if concurrent and a.started and a.retiredRoster ~= self.rosterSignature then return end
-        if p[8] == "1" then
-            if not concurrent then return end -- Past actions cannot open or replace a warning.
-            if self:retire() then self:changed() end
-        end
+        -- A completed solo/previous-party event is not this party's concurrent alias.
+        if concurrent and a.started and a.retiredRoster ~= self.rosterSignature then concurrent = false end
+        if p[8] == "1" and not concurrent then return end -- Past actions cannot open or replace a warning.
         -- Server time is only a replay bound, never consensus or election ordering.
-        local inherited = {}
-        if concurrent then
-            for _, stage in ipairs({"I", "G"}) do inherited[stage] = self.saved.ledger[a.key .. stage] end
-        end
-        if not a or self.restoring or not self.healthy or p[4] == a.key or (concurrent and p[3] < a.key) then
-            self:adopt({key = p[3], parent = p[4], ruleID = p[5], context = p[6],
-                time = tonumber(p[7]), started = p[8] == "1" or concurrent and a.started or false,
-                retiredRoster = concurrent and a.retiredRoster or nil})
-            for stage, timestamp in pairs(inherited) do self.saved.ledger[p[3] .. stage] = timestamp end
+        local candidate = {key = p[3], parent = p[4], ruleID = p[5], context = p[6],
+            time = tonumber(p[7]), started = false}
+        if not a then
+            self:adopt(candidate)
+        elseif not concurrent or p[8] == "1" or p[3] < a.key then
+            self:probe(sender, candidate, concurrent)
         end
         return
     end
     if not a or p[3] ~= a.key then return end
+    if kind == "V" and #p == 4 then
+        if not a.started or a.retiredRoster == self.rosterSignature then
+            self:send("Y", a.key, p[4], a.started and "1" or "0")
+        end
+        return
+    end
     if a.started and kind ~= "X" and kind ~= "L" then return end
     if kind == "H" and p[4] then
         local old = self.peers[sender]
@@ -448,6 +505,7 @@ function Core:tick()
             p.expired = true
             self:invalidate()
             self.healthy = false
+            self.probes = {}
             self.notice = "WAIT. An addon stopped responding. Reconnect, then /zkir retry."
         end
     end

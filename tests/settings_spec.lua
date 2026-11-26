@@ -236,6 +236,16 @@ test("restored attempts and concurrent event aliases do not replay sound", funct
     expect(canonical < a.key, "fixture uses the lower canonical key")
     local payload = table.concat({"1", "E", canonical, a.parent, a.ruleID, a.context, tostring(a.time), "0"}, "|")
     c.event("CHAT_MSG_ADDON", "ZKIRPQ1", payload, "PARTY", "Bob-Realm")
+    expect(c.ns.engine.active.key == a.key, "unconfirmed event aliases cannot replace the current attempt")
+    local token
+    for _, message in ipairs(c.messages) do
+        if message.data then
+            local key, value = message.data:match("^1|V|([^|]+)|([^|]+)$")
+            if key == canonical then token = value end
+        end
+    end
+    expect(token, "alias reconciliation must issue a live challenge")
+    c.event("CHAT_MSG_ADDON", "ZKIRPQ1", table.concat({"1", "Y", canonical, token, "0"}, "|"), "PARTY", "Bob-Realm")
     expect(c.ns.engine.active.key == canonical, "network event alias must actually converge")
     c.advance(8)
     expect(#c.sounds == 1, "concurrent detections have one audible warning")

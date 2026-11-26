@@ -189,7 +189,7 @@ dialogue(9679, "Windsor: release Tobias",
 dialogue(14354, "Pusillin's chase",
     "Pusillin runs. His final dialogue starts a fight.",
     "One player: talk to Pusillin.\nEveryone: follow together.",
-    "Verify the current chase stop and the route. Later conversations at this same NPC need a fresh /zkir retry for renewed coordination.")
+    "Regroup at each chase stop. If the next dialogue does not open a fresh warning, use /zkir retry. Check again before the final fight.")
 for _, id in ipairs({11491, 14241}) do
     dialogue(id, "Ironbark's door event",
         "Ironbark opens the door, then leaves.",

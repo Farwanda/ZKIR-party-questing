@@ -28,6 +28,16 @@ local function normalName(name, realm)
     if name == "" or realm == "" or name:find("[%s%p]") or realm:find("[|,;:%c/\\]") then return nil end
     return (name .. "-" .. realm):lower()
 end
+local function listedName(names, key)
+    if names[key] == true then return key end
+    -- Lua lower() only handles ASCII. Use the client's UTF-8 case comparison
+    -- for existing saved spellings too; unavailable evidence grants no match.
+    if type(strcmputf8i) ~= "function" then return nil end
+    for name, allowed in pairs(names) do
+        if allowed == true and read(strcmputf8i, name, key) == 0 then return name end
+    end
+    return nil
+end
 local function fullName(unit)
     local name, realm = read(UnitFullName, unit)
     if realm == nil or realm == "" then realm = read(GetNormalizedRealmName) end
@@ -119,7 +129,7 @@ local function trusted(members)
     if type(bn.IsBattleNetFriendsListEnabled) == "function" and read(bn.IsBattleNetFriendsListEnabled) ~= true then connected = false end
     for _, member in ipairs(members) do
         local match = member.unit == "player"
-        if not match and options().ffaCharacters == true and options().ffaNames[member.key] == true then match = true end
+        if not match and options().ffaCharacters == true and listedName(options().ffaNames, member.key) then match = true end
         if not match and options().ffaFriends == true and connected then
             local account = read(bn.GetAccountInfoByGUID, member.guid)
             match = field(account, "isFriend") == true
@@ -244,12 +254,15 @@ function Loot.init(db)
     local values = options()
     local names = {}
     if type(values.ffaNames) == "table" then
+        local spellings = {}
         for name, allow in pairs(values.ffaNames) do
-            if type(name) == "string" and allow == true then
-                local character, realm = name:match("^([^-]+)%-(.+)$")
-                local key = normalName(character, realm)
-                if key then names[key] = true end
-            end
+            if type(name) == "string" and allow == true then spellings[#spellings + 1] = name end
+        end
+        table.sort(spellings)
+        for _, name in ipairs(spellings) do
+            local character, realm = name:match("^([^-]+)%-(.+)$")
+            local key = normalName(character, realm)
+            if key and not listedName(names, key) then names[key] = true end
         end
     end
     values.ffaNames = names
@@ -278,9 +291,8 @@ function Loot.setCharacters(input)
             if not character then character, realm = line, read(GetNormalizedRealmName) end
             local key = normalName(character, realm)
             if not key then return false, "Use Name-Realm, one per line. A name alone uses your current realm." end
-            if not names[key] then count = count + 1 end
+            if not listedName(names, key) then count = count + 1; names[key] = true end
             if count > 100 then return false, "The list is limited to 100 characters." end
-            names[key] = true
         end
     end
     options().ffaNames = names

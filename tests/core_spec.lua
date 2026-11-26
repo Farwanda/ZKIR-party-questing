@@ -10,6 +10,9 @@ local function copy(t)
     local c = {}; for k, v in pairs(t) do c[k] = copy(v) end; return c
 end
 local function fact(state, signature) return {state = state or "R", reason = "TEST", signature = signature or state or "R"} end
+local function envelope(a, started)
+    return table.concat({"1", "E", a.key, a.parent, a.ruleID, a.context, tostring(a.time), started and "1" or "0"}, "|")
+end
 local World = {}; World.__index = World
 function World:add(name, saved)
     self.boots[name] = (self.boots[name] or 0) + 1
@@ -233,6 +236,275 @@ test("completed solo actions cannot open or announce an old event to a later par
         end
     end
 end)
+test("retired solo histories do not block a new party event or its actual leader", function()
+    for _, bothHaveHistory in ipairs({false, true}) do
+        for _, reload in ipairs({false, true}) do
+            local w = World.new({A})
+            w.nodes[A].core:detect("a155", "alice-solo"); w:pump(1)
+            local oldAlice = copy(w.nodes[A].core.active)
+            w.nodes[A].core:action(155, "accept")
+            local bobSaved, oldBob
+            if bothHaveHistory then
+                local solo = World.new({B})
+                solo.nodes[B].core:detect("a4245", "bob-solo"); solo:pump(1)
+                oldBob = copy(solo.nodes[B].core.active)
+                solo.nodes[B].core:action(4245, "accept")
+                bobSaved = solo.nodes[B].saved
+            end
+            w.roster[2] = {name = B, connected = true, leader = false}
+            w:rosterChanged(); w:add(B, bobSaved)
+            if reload then w:add(A, w.nodes[A].saved) end
+            w:pump(8); w:chatCount(0)
+
+            w.nodes[B].core:detect("a452", "new-party-npc"); w:pump(25)
+            local current = w.nodes[B].core.active.key
+            for _, n in pairs(w.nodes) do
+                eq(n.core.active.key, current, "both clients must discover the new party attempt")
+                eq(n.core.active.ruleID, "a452")
+                assert(not n.core.active.started)
+            end
+            w:ready(); w:chatCount(2, A)
+            for _, started in ipairs({false, true}) do
+                w.nodes[B].core:receive(A, envelope(oldAlice, started))
+                if oldBob then w.nodes[A].core:receive(B, envelope(oldBob, started)) end
+            end
+            w.nodes[B].core:receive(A, "1|X|" .. oldAlice.key)
+            if oldBob then w.nodes[A].core:receive(B, "1|X|" .. oldBob.key) end
+            w:pump(8)
+            for _, n in pairs(w.nodes) do eq(n.core.active.key, current) end
+            w:ready(); w:chatCount(2, A)
+        end
+    end
+end)
+test("a party can prepare the same NPC after its leader completed it solo", function()
+    local w = World.new({A})
+    w.nodes[A].core:detect("a155", "same-npc"); w:pump(1)
+    w.nodes[A].core:action(155, "accept")
+    w.roster[2] = {name = B, connected = true, leader = false}
+    w:rosterChanged(); w:add(B)
+    w.nodes[A].want = fact("N", "already-started-solo")
+    w.nodes[B].core:detect("a155", "same-npc"); w:pump(25)
+    local current = w.nodes[B].core.active.key
+    for _, n in pairs(w.nodes) do
+        eq(n.core.active.key, current)
+        assert(not n.core.active.started, "an earlier solo action cannot retire the new party attempt")
+    end
+    eq(w:row(B, A).status, "Not Ready")
+    assert(not w.nodes[A].core:allReady()); w:chatCount(1, A)
+end)
+test("delayed same-NPC envelopes from a previous party cannot retire its fresh attempt", function()
+    for _, started in ipairs({false, true}) do
+        local w = World.new({A, B, C}, {A, C})
+        w.nodes[A].core:detect("a155", "same-npc")
+        local old = copy(w.nodes[A].core.active)
+        w:pump(1); w.nodes[A].core:action(155, "accept"); w:pump(1)
+        w.roster[3], w.nodes[C] = nil, nil
+        w:rosterChanged(); w:add(B)
+        w.nodes[B].core:detect("a155", "same-npc")
+        local current = w.nodes[B].core.active.key
+        w.nodes[B].core:receive(A, envelope(old, started)); w:pump(30)
+        for _, n in pairs(w.nodes) do
+            eq(n.core.active.key, current)
+            assert(not n.core.active.started, "past-party traffic is not evidence this party started its event")
+        end
+        w:ready(); w:chatCount(2, A)
+    end
+end)
+test("simultaneous different detections converge without reopening the losing event", function()
+    local w = World.new({A, B}); w.delays, w.duplicate = true, true
+    w.nodes[A].core:detect("a155", "alice-npc")
+    w.nodes[B].core:detect("a4245", "bob-npc")
+    local alice, bob = copy(w.nodes[A].core.active), copy(w.nodes[B].core.active)
+    w:pump(30)
+    local current = w.nodes[A].core.active.key
+    eq(w.nodes[B].core.active.key, current, "independent discoveries must agree on one compact window")
+    w:ready(); w:chatCount(2, A)
+    w.nodes[A].core:receive(B, envelope(bob, false))
+    w.nodes[B].core:receive(A, envelope(alice, false))
+    w:pump(10)
+    for _, n in pairs(w.nodes) do eq(n.core.active.key, current) end
+    w:ready(); w:chatCount(2, A)
+end)
+test("new interactions and retries remain fresh after party retirement and old traffic", function()
+    local w = World.new({A, B}); w:start()
+    w.nodes[B].core:action(155, "accept"); w:pump(5)
+    local retiredTraffic = copy(w.wire)
+    w.nodes[B].core:detect("a4245", "next-npc"); w:pump(25)
+    local nextKey = w.nodes[B].core.active.key
+    for _, n in pairs(w.nodes) do eq(n.core.active.key, nextKey) end
+    w:ready(); w:chatCount(4, A)
+    for _, message in ipairs(retiredTraffic) do w:deliver(message) end
+    w:pump(5)
+    for _, n in pairs(w.nodes) do eq(n.core.active.key, nextKey) end
+    w:ready(); w:chatCount(4, A)
+    local previousTraffic = copy(w.wire)
+    assert(w.nodes[A].core:retry()); w:pump(25)
+    local retryKey = w.nodes[A].core.active.key
+    assert(retryKey ~= nextKey)
+    for _, message in ipairs(previousTraffic) do w:deliver(message) end
+    w:pump(8)
+    for _, n in pairs(w.nodes) do eq(n.core.active.key, retryKey) end
+    w:ready(); w:chatCount(6, A)
+end)
+test("unseen old event envelopes cannot reopen a retired interaction", function()
+    for _, movedOn in ipairs({false, true}) do
+        local w = World.new({A, B})
+        w.nodes[A].core:detect("a155", "alice-npc"); w.nodes[A].core:action(155, "accept")
+        w.nodes[B].core:detect("a4245", "bob-old-npc")
+        local current, stale = copy(w.nodes[A].core.active), copy(w.nodes[B].core.active)
+        if movedOn then w.nodes[B].core:detect("a452", "bob-current-npc")
+        else w.nodes[B].core:action(4245, "accept") end
+        w.queue = {}
+        w.drop = function(message, recipient)
+            return message.sender == B and recipient == A and message.payload:match("^1|E|")
+        end
+        w.nodes[A].core:receive(B, envelope(stale, false)); w:flush(); w:pump(15)
+        eq(w.nodes[A].core.active.key, current.key)
+        assert(w.nodes[A].core.active.started and not w.nodes[A].core:allReady(),
+            "an unseen delayed envelope cannot reopen a completed current interaction")
+        for _, message in ipairs(w.wire) do
+            if message.payload:find("1|Y|" .. stale.key .. "|", 1, true) == 1 then
+                assert(not movedOn and message.payload:match("|1$"),
+                    "a sender must not authenticate a started or replaced event as pending")
+            end
+        end
+        for _, chat in ipairs(w.chats) do assert(chat.sender ~= A, "retired leader cannot warn about replayed events") end
+    end
+end)
+test("an unseen replaced child event cannot roll back a completed parent", function()
+    local w = World.new({A, B}); w:start()
+    w.nodes[A].core:action(155, "accept"); w:pump(1)
+    local parentKey = w.nodes[A].core.active.key
+    w.nodes[B].core:detect("a4245", "old-child-npc")
+    local stale = copy(w.nodes[B].core.active)
+    eq(stale.parent, parentKey)
+    w.nodes[B].core:detect("a452", "current-npc")
+    local currentKey = w.nodes[B].core.active.key
+    w.queue = {}
+    w.nodes[A].core:receive(B, envelope(stale, false)); w:flush()
+    eq(w.nodes[A].core.active.key, parentKey, "a parent link alone cannot authenticate an unseen child")
+    assert(w.nodes[A].core.active.started)
+    w.nodes[B].core:broadcast(); w:pump(25)
+    for _, n in pairs(w.nodes) do eq(n.core.active.key, currentKey) end
+    w:ready(); w:chatCount(4, A)
+end)
+local function delayedReconciliation()
+    local w = World.new({A, B})
+    w.nodes[A].core:detect("a155", "alice-npc"); w.nodes[A].core:action(155, "accept")
+    w.nodes[B].core:detect("a4245", "bob-npc")
+    local current, candidate = copy(w.nodes[A].core.active), copy(w.nodes[B].core.active)
+    w.queue = {}
+    local reply
+    w.drop = function(message, recipient)
+        if message.sender == B and recipient == A then
+            if message.payload:match("^1|Y|") then reply = copy(message); return true end
+            return message.payload:match("^1|E|") ~= nil
+        end
+    end
+    w.nodes[A].core:receive(B, envelope(candidate, false)); w:flush()
+    assert(reply, "fixture must hold a live reconciliation response before delivery")
+    eq(w.nodes[A].core.active.key, current.key, "a probe alone cannot replace the current event")
+    return w, reply, current, candidate
+end
+test("delayed reconciliation replies cannot cross roster, event, reload, or expiry boundaries", function()
+    for _, transition in ipairs({"roster", "event", "reload", "expiry"}) do
+        local w, reply = delayedReconciliation()
+        if transition == "roster" then
+            w.roster[2].connected = false; w:rosterChanged()
+            w.roster[2].connected = true; w:rosterChanged()
+        elseif transition == "event" then
+            w.nodes[A].core:detect("a452", "replacement-npc")
+        elseif transition == "reload" then
+            w:add(A, w.nodes[A].saved)
+        else w.t = w.t + 13 end
+        local expected = w.nodes[A].core.active.key
+        w.nodes[A].core:receive(reply.sender, reply.payload)
+        eq(w.nodes[A].core.active.key, expected, "an old response cannot survive " .. transition)
+    end
+end)
+test("a candidate's action before its delayed reply prevents reopening that event", function()
+    local w, reply, current = delayedReconciliation()
+    w.nodes[B].core:action(4245, "accept"); w:flush()
+    w.nodes[A].core:receive(reply.sender, reply.payload); w:pump(15)
+    eq(w.nodes[A].core.active.key, current.key)
+    assert(w.nodes[A].core.active.started and not w.nodes[A].core:allReady())
+    w:chatCount(0)
+end)
+test("concurrent aliases learn an action that overtakes a delayed pending reply", function()
+    local w = World.new({A, B})
+    w.nodes[A].core:detect("a155", "same-npc")
+    w.nodes[B].core:detect("a155", "same-npc")
+    local candidate, reply = copy(w.nodes[B].core.active)
+    w.queue = {}
+    w.drop = function(message, recipient)
+        if message.sender == B and recipient == A then
+            if message.payload:match("^1|Y|") then reply = copy(message); return true end
+            return message.payload:match("^1|E|") ~= nil
+        end
+    end
+    w.nodes[A].core:receive(B, envelope(candidate, false)); w:flush()
+    assert(reply, "fixture must delay a live pending-alias response")
+    w.nodes[B].core:action(155, "accept"); w:flush()
+    w.nodes[A].core:receive(reply.sender, reply.payload)
+    w.drop = nil; w:pump(25)
+    eq(w.nodes[A].core.active.key, w.nodes[B].core.active.key)
+    for _, n in pairs(w.nodes) do
+        assert(n.core.active.started and not n.core:allReady(), "same-party action must eventually retire both aliases")
+    end
+    w:chatCount(0)
+end)
+test("a delayed reconciliation reply cannot clear a latched messaging failure", function()
+    local w, reply, current, candidate = delayedReconciliation()
+    w.blockSend[A] = true
+    assert(not w.nodes[A].core:send("V", candidate.key, "failed-probe"))
+    assert(not w.nodes[A].core.healthy)
+    w.nodes[A].core:receive(reply.sender, reply.payload)
+    eq(w.nodes[A].core.active.key, current.key)
+    assert(not w.nodes[A].core.healthy and not w.nodes[A].core:allReady(),
+        "a response in flight cannot silently recover a failed outbound transport")
+end)
+test("a fresh live probe recovers a failed completed interaction after joining a new party", function()
+    local w = World.new({A, C}); w:start(C); w:ready(); w:chatCount(2, A)
+    w.blockSend[A] = true
+    w.nodes[A].core:action(155, "accept")
+    assert(w.nodes[A].core.active.started and not w.nodes[A].core.healthy)
+    w.nodes[C].core:action(155, "accept"); w:pump(1)
+    w.nodes[C] = nil
+    w.roster[2] = {name = B, connected = true, leader = false}
+    w.blockSend[A] = nil
+    w:rosterChanged(); w:add(B)
+    w.nodes[B].core:detect("a4245", "new-party-npc"); w:pump(25)
+    local current = w.nodes[B].core.active.key
+    for _, n in pairs(w.nodes) do
+        eq(n.core.active.key, current)
+        assert(n.core.healthy and not n.core.active.started)
+    end
+    w:ready(); w:chatCount(4, A)
+end)
+test("a failed recovery probe does not retry on repeated event envelopes", function()
+    local w = World.new({A, B})
+    w.nodes[A].core:detect("a155", "alice-npc")
+    w.blockSend[A] = true; w.nodes[A].core:action(155, "accept")
+    assert(not w.nodes[A].core.healthy)
+    w.nodes[B].core:detect("a4245", "bob-npc")
+    local candidate = copy(w.nodes[B].core.active)
+    w.queue = {}
+    local sends = w.sends
+    for i = 1, 20 do
+        w.t = i * 4
+        w.nodes[A].core:receive(B, envelope(candidate, false))
+    end
+    eq(w.sends, sends + 1, "one failed probe must latch across subsequent pulses and expiry")
+    w.blockSend[A] = nil
+    w.nodes[A].core:receive(B, envelope(candidate, false))
+    eq(w.sends, sends + 1, "time or restored API availability alone must not retry a failed probe")
+    w.roster[2].connected = false; w:rosterChanged()
+    w.roster[2].connected = true; w:rosterChanged()
+    w.nodes[A].core:receive(B, envelope(candidate, false)); w:flush(); w:pump(25)
+    eq(w.nodes[A].core.active.key, candidate.key)
+    assert(w.nodes[A].core.healthy)
+    w:ready(); w:chatCount(2, A)
+end)
 test("action during an initial announcement claim cancels local and remote late warnings", function()
     for _, actor in ipairs({A, B}) do
         local w = World.new({A, B}); w.nodes[A].core:detect("a155", "npc"); w:pump(6)
@@ -309,6 +581,7 @@ test("concurrent aliases converge without undoing an already observed action", f
     highCore:action(155, "accept")
     lowCore:receive(higher, table.concat({"1", "E", high.key, high.parent, high.ruleID,
         high.context, tostring(high.time), "1"}, "|"))
+    w:pump(4)
     assert(lowCore.active.started, "known concurrent attempt can learn that its action already happened")
     highCore:receive(lower, table.concat({"1", "E", low.key, low.parent, low.ruleID,
         low.context, tostring(low.time), "0"}, "|"))
@@ -403,6 +676,25 @@ test("reloading a client that missed multiple attempts resynchronizes", function
     local current = w.nodes[B].core.active.key
     w:add(A, w.nodes[A].saved); w:pump(25)
     eq(w.nodes[A].core.active.key, current); w:ready()
+end)
+test("a client that misses several interactions catches up after peer expiry without reload", function()
+    local w = World.new({A, B}); w:start()
+    local previous = w.nodes[A].core.active.key
+    w.nodes[A].paused = true
+    w.nodes[B].core:detect("a4245", "second-npc"); w:pump(1)
+    w.nodes[B].core:action(4245, "accept"); w:pump(1)
+    w.nodes[B].core:detect("a452", "third-npc"); w:pump(1)
+    local current = w.nodes[B].core.active.key
+    w.nodes[A].paused = false; w:pump(5)
+    eq(w.nodes[A].core.active.key, previous, "the initially healthy client still has its older pending interaction")
+    assert(w.nodes[A].core.healthy)
+    w:pump(25)
+    for _, n in pairs(w.nodes) do
+        eq(n.core.active.key, current, "an earlier live conflict cannot permanently block later recovery")
+        eq(n.core.active.ruleID, "a452")
+    end
+    w:ready(); w:chatCount(4)
+    eq(w.chats[#w.chats].sender, A, "the actual leader announces readiness after catching up")
 end)
 test("expanded catalogue synchronizes mixed parties and retires each action", function()
     for _, rule in pairs(NS.Rules) do

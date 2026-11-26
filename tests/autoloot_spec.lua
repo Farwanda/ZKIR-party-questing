@@ -6,7 +6,7 @@ local function test(name, fn)
     assert(ok, name .. ": " .. tostring(err))
     passed = passed + 1
 end
-local function fixture(db)
+local function fixture(db, compareNames)
     db = db or {}; db.settings = type(db.settings) == "table" and db.settings or {}
     local state = {time = 0, method = 3, master = 0, count = 1, leader = true, home = true,
         instance = false, inInstance = false, instanceType = "none", raid = false, combat = false, loot = 0, bn = true,
@@ -28,6 +28,7 @@ local function fixture(db)
         local member = state.members[unit]; if member then return member.name, member.realm end
     end
     env.GetNormalizedRealmName = function() return "Realm" end
+    env.strcmputf8i = compareNames
     env.UnitIsConnected = function(unit) return state.members[unit] and state.members[unit].connected end
     env.UnitIsGroupLeader = function(unit) return unit == "player" and state.leader or false end
     env.UnitAffectingCombat = function(unit) return state.members[unit] and state.members[unit].combat or false end
@@ -131,6 +132,68 @@ test("explicit character names normalize realms, deduplicate, persist and valida
     expect(not c.loot.setCharacters("Carla"), "bare names need a known local realm")
     expect(c.loot.setCharacters(""), "empty list is allowed")
     expect(next(c.values.ffaNames) == nil, "empty list removes prior names")
+end)
+
+-- Simulated native UTF-8 comparison, with explicit case pairs rather than a
+-- second production normalizer. The real client comparison still needs a field check.
+local function unicodeCompare(left, right)
+    local cases = {
+        ["Боб-Гордунни"] = "боб-гордунни", ["БОБ-ГОРДУННИ"] = "боб-гордунни",
+        ["Élodie-Érealm"] = "élodie-érealm", ["ÉLODIE-ÉREALM"] = "élodie-érealm",
+    }
+    left, right = cases[left] or left, cases[right] or right
+    return left == right and 0 or (left < right and -1 or 1)
+end
+
+test("Unicode allowlist matches character and realm case without dropping accents or scripts", function()
+    for _, names in ipairs({{"Боб", "Гордунни", "боб-гордунни"}, {"Élodie", "É Realm", "élodie-érealm"}}) do
+        local c = fixture(nil, unicodeCompare)
+        c.state.members.party1.name, c.state.members.party1.realm = names[1], names[2]
+        expect(c.loot.setCharacters(names[3]), "Unicode list accepted")
+        c.enable(false, true); c.advance(4)
+        expect(#c.calls == 1 and c.state.method == 0, "native case comparison authorizes the named character")
+        c.state.members.party1.realm = "OtherRealm"; c.advance(2)
+        expect(#c.calls == 2 and c.state.method == 3, "Unicode match remains realm-specific")
+    end
+    for _, names in ipairs({{"Élodie", "elodie-realm"}, {"Боб", "bob-realm"}}) do
+        local c = fixture(nil, unicodeCompare)
+        c.state.members.party1.name = names[1]
+        c.loot.setCharacters(names[2]); c.enable(false, true); c.advance(4)
+        expect(#c.calls == 0, "accents and different scripts do not borrow another identity's trust")
+    end
+end)
+
+test("Unicode duplicates and old saved capitalization survive reload without manual reentry", function()
+    local c = fixture({settings = {ffaNames = {["Боб-Гордунни"] = true, ["боб-гордунни"] = true,
+        ["Élodie-Érealm"] = true, ["forged-realm"] = false}}}, unicodeCompare)
+    local count = 0; for _ in pairs(c.values.ffaNames) do count = count + 1 end
+    expect(count == 2, "saved Unicode case duplicates collapse while false entries stay excluded")
+    c.state.members.party1.name, c.state.members.party1.realm = "боб", "гордунни"
+    c.enable(false, true); c.advance(4)
+    expect(#c.calls == 1, "legacy uppercase saved key matches the current lowercase character")
+    expect(c.loot.setCharacters("Боб-Гордунни\nбоб-гордунни\nБОБ-ГОРДУННИ"), "case variants accepted")
+    count = 0; for _ in pairs(c.values.ffaNames) do count = count + 1 end
+    expect(count == 1, "editor treats Unicode case variants as one explicit character")
+    local before = c.loot.charactersText()
+    local reloaded = fixture(c.db, unicodeCompare)
+    expect(reloaded.loot.charactersText() == before, "chosen spelling remains stable across reload")
+end)
+
+test("unavailable or unsafe Unicode comparison never grants trust", function()
+    local variants = {
+        false, function() error("unavailable") end, function() return nil end,
+        function() return {secret = true} end, function() return "0" end, function() return true end,
+    }
+    for index, compare in ipairs(variants) do
+        local c = fixture(nil, compare)
+        c.state.members.party1.name, c.state.members.party1.realm = "Боб", "Гордунни"
+        expect(c.loot.setCharacters("боб-гордунни"), "saved Unicode input retained without a comparator")
+        c.enable(false, true); c.advance(4)
+        expect(#c.calls == 0, "no unverified Unicode case match: " .. index)
+        expect(c.loot.setCharacters("Боб-Гордунни"), "exact Unicode spelling remains available")
+        c.advance(4)
+        expect(#c.calls == 1, "exact identity needs no case API: " .. index)
+    end
 end)
 
 test("friend policy uses each other member's exact GUID and excludes self from friendship", function()

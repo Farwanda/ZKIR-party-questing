@@ -154,6 +154,134 @@ test("dungeon dialogue warnings precede selection and retire safely", function()
     local c = client({guid = "Creature-0-1-1-1-235906-0001"})
     c.event("GOSSIP_SHOW"); assert(not c.ns.engine.active, "outdoor Bramblesnap is a different NPC")
 end)
+test("changed dialogue choices rearm without reusing confirmations or repeating unchanged menus", function()
+    local c = client({guid = "Creature-0-1-1-1-14354-0001"})
+    local choices = {{gossipOptionID = 101, orderIndex = 0}, {gossipOptionID = 102, orderIndex = 4}}
+    c.env.C_GossipInfo.GetOptions = function() return choices end
+    c.event("GOSSIP_SHOW"); c.env.GossipFrame:Show(); c.advance(6)
+    local core, key = c.ns.engine, c.ns.engine.active.key
+    assert(core:confirm(core.me, "R"))
+    choices = {choices[2], choices[1]}
+    c.event("GOSSIP_SHOW")
+    assert(core.active.key == key and core.manual[core.me], "option order alone must preserve preparation")
+    c.hooks.SelectOption(101); assert(core.active.started)
+    c.event("GOSSIP_SHOW"); c.advance(1)
+    assert(core.active.key == key and core.active.started, "unchanged choices cannot revive a finished check")
+    choices = {{gossipOptionID = 103, orderIndex = 0}}
+    c.event("GOSSIP_SHOW"); c.advance(6)
+    assert(core.active.key ~= key and not core.active.started and not core.manual[core.me])
+    assert(core:rows()[1].status == "Unknown" and not core:allReady(), "later dialogue needs fresh evidence")
+    local window = c.env.ZKIRPartyQuestingWindow
+    assert(window:GetPoint() and window.point[2] == c.env.GossipFrame, "stage context must keep NPC docking")
+    c.hooks.SelectOption(101); assert(not core.active.started, "an absent option cannot retire the menu")
+    c.hooks.SelectOptionByIndex(103); assert(not core.active.started, "index is orderIndex, not option ID")
+    c.hooks.SelectOptionByIndex(0); assert(core.active.started, "native zero-based orderIndex must work")
+end)
+test("synchronous submenus cannot be retired by the preceding selection posthook", function()
+    for _, method in ipairs({"SelectOption", "SelectOptionByIndex"}) do
+        local c = client({guid = "Creature-0-1-1-1-14354-0001"})
+        local choices = {{gossipOptionID = 201, orderIndex = 0}}
+        c.env.C_GossipInfo.GetOptions = function() return choices end
+        c.event("GOSSIP_SHOW"); c.advance(6)
+        local core, key = c.ns.engine, c.ns.engine.active.key
+        assert(core:confirm(core.me, "R"))
+        -- The game's native function can synchronously display its submenu
+        -- before hooksecurefunc invokes our callback.
+        choices = {{gossipOptionID = 202, orderIndex = 0}}
+        c.event("GOSSIP_SHOW")
+        c.hooks[method](method == "SelectOption" and 201 or 0)
+        assert(core.active.key ~= key and not core.active.started and not core.manual[core.me], method)
+        c.advance(1)
+        c.hooks[method](method == "SelectOption" and 202 or 0)
+        assert(core.active.started, "the new menu's own later selection must retire it")
+    end
+end)
+test("missing or restricted dialogue identities cannot manufacture a later stage", function()
+    for _, unavailable in ipairs({false, {}, {{orderIndex = 0}},
+        {{gossipOptionID = {secret = true}, orderIndex = 0}}, {secret = true}}) do
+        local c = client({guid = "Creature-0-1-1-1-14354-0001"})
+        c.env.C_GossipInfo.GetOptions = function() return {{gossipOptionID = 301, orderIndex = 0}} end
+        c.event("GOSSIP_SHOW"); c.advance(1); c.hooks.SelectOption(301)
+        local key = c.ns.engine.active.key
+        c.env.C_GossipInfo.GetOptions = unavailable and function() return unavailable end or nil
+        c.event("GOSSIP_SHOW"); c.advance(6)
+        assert(c.ns.engine.active.key == key and c.ns.engine.active.started,
+            "unavailable option IDs must preserve retirement")
+    end
+end)
+test("unchanged dialogue reopening sends only its original party warning", function()
+    local c = client({party = true, guid = "Creature-0-1-1-1-14354-0001"})
+    local choices = {{gossipOptionID = 401, orderIndex = 0}}
+    c.env.C_GossipInfo.GetOptions = function() return choices end
+    c.event("GOSSIP_SHOW"); c.advance(10)
+    c.hooks.SelectOption(401); c.event("GOSSIP_SHOW"); c.advance(10)
+    local count = 0
+    for _, message in ipairs(c.messages) do if message.chat then count = count + 1 end end
+    assert(count == 1, "unchanged retired choices must not send another warning")
+    choices = {{gossipOptionID = 402, orderIndex = 0}}
+    c.event("GOSSIP_SHOW"); c.advance(10)
+    count = 0
+    for _, message in ipairs(c.messages) do if message.chat then count = count + 1 end end
+    assert(count == 2, "a new observed choice needs its own initial warning")
+end)
+test("dialogue stage identities survive reload and do not depend on localized labels", function()
+    local options = {party = true, guid = "Creature-0-1-1-1-14354-0001"}
+    local c = client(options)
+    local choices = {{gossipOptionID = 501, orderIndex = 0, name = "Continue"}}
+    c.env.C_GossipInfo.GetOptions = function() return choices end
+    c.event("GOSSIP_SHOW"); c.advance(6); c.hooks.SelectOption(501)
+    local key, context = c.ns.engine.active.key, c.ns.engine.active.context
+    options.db = c.env.ZKIRPartyQuestingDB
+    c = client(options)
+    choices[1].name, choices[1].orderIndex = "Продолжить", 7
+    c.env.C_GossipInfo.GetOptions = function() return choices end
+    c.event("GOSSIP_SHOW"); c.advance(6)
+    assert(c.ns.engine.active.context == context and c.ns.engine.active.key == key and c.ns.engine.active.started,
+        "reload, translated text, and order cannot turn a completed choice into a new stage")
+    choices = {{gossipOptionID = 502, orderIndex = 0}}
+    c.event("GOSSIP_SHOW")
+    assert(c.ns.engine.active.key ~= key and not c.ns.engine.active.started)
+    for _, message in ipairs(c.messages) do
+        assert(not message.data or #message.data <= 255, "observed stage must fit the addon channel")
+    end
+end)
+test("empty dialogue options still retire a solo choice before joining a party", function()
+    for _, reload in ipairs({false, true}) do
+        local options = {guid = "Creature-0-1-1-1-14354-0001"}
+        local c = client(options)
+        c.env.C_GossipInfo.GetOptions = function() return {} end
+        c.event("GOSSIP_SHOW"); c.advance(6); c.hooks.SelectOptionByIndex(0)
+        assert(c.ns.engine.active.started, "empty options must retain captured-selection fallback")
+        if reload then
+            options.db = c.env.ZKIRPartyQuestingDB
+            c = client(options)
+        end
+        options.party = true; c.event("GROUP_ROSTER_UPDATE"); c.advance(20)
+        for _, message in ipairs(c.messages) do
+            assert(not message.chat, "a completed solo choice with empty IDs must not warn the later party")
+        end
+    end
+end)
+test("first available dialogue IDs establish a baseline without reviving a completed choice", function()
+    local c = client({guid = "Creature-0-1-1-1-14354-0001"})
+    local choices = {}
+    c.env.C_GossipInfo.GetOptions = function() return choices end
+    c.event("GOSSIP_SHOW"); c.advance(1); c.hooks.SelectOptionByIndex(0)
+    local key = c.ns.engine.active.key
+    choices = {{gossipOptionID = 601, orderIndex = 0}}
+    c.event("GOSSIP_SHOW"); c.advance(1)
+    assert(c.ns.engine.active.key == key and c.ns.engine.active.started,
+        "first available IDs do not prove the choice changed")
+    choices = {}; c.event("GOSSIP_SHOW")
+    choices = {{gossipOptionID = 601, orderIndex = 7}}
+    c.event("GOSSIP_SHOW")
+    assert(c.ns.engine.active.key == key and c.ns.engine.active.started,
+        "temporarily missing IDs must not erase the observed baseline")
+    choices = {{gossipOptionID = 602, orderIndex = 0}}
+    c.event("GOSSIP_SHOW")
+    assert(c.ns.engine.active.key ~= key and not c.ns.engine.active.started,
+        "a later observed change must still open fresh coordination")
+end)
 test("Nagmara repeat dialogue respects known prior completion", function()
     local c = client({guid = "Creature-0-1-1-1-9500-0001"})
     c.event("GOSSIP_SHOW"); assert(not c.ns.engine.active)
