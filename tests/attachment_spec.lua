@@ -91,8 +91,11 @@ test("both native gossip selection paths use captured context and retire once", 
         c.env.GossipFrame:Show(); c.event("GOSSIP_SHOW"); c.advance(6)
         local panel, oldHeight = warning(c), warning(c):GetHeight()
         expect(type(c.hooks[method]) == "function", "native path needs a posthook: " .. method)
-        c.env.GossipFrame:Hide(); c.options.guid = "Creature-0-1-1-1-9999-0001"
-        c.hooks[method](123)
+        c.options.selectGossip = function()
+            c.env.GossipFrame:Hide(); c.options.guid = "Creature-0-1-1-1-9999-0001"
+            c.event("GOSSIP_CLOSED")
+        end
+        c.env.C_GossipInfo[method](123)
         expect(c.ns.engine.active.started and not c.ns.engine:allReady(), "selection retires captured dialogue despite native cleanup")
         expect(panel:IsShown() and panel:GetHeight() < oldHeight, "observed action collapses the panel")
         expect(text(c, panel):find("CHOICE MADE", 1, true), "collapsed panel reports selection without claiming the event started")

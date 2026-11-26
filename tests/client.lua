@@ -187,8 +187,12 @@ local function client(options)
         end,
         SendChatMessage = function(data, channel) messages[#messages + 1] = {chat = data, channel = channel} end,
     }
-    env.C_GossipInfo = {GetAvailableQuests = function() return {} end,
-        SelectOption = function() end, SelectOptionByIndex = function() end}
+    env.C_GossipInfo = {GetAvailableQuests = function() return {} end}
+    for _, method in ipairs({"SelectOption", "SelectOptionByIndex"}) do
+        env.C_GossipInfo[method] = function(...)
+            if options.selectGossip then return options.selectGossip(method, ...) end
+        end
+    end
     env.hooksecurefunc = function(target, method, callback)
         hooks[method] = callback
         local original = target[method]
@@ -198,6 +202,7 @@ local function client(options)
     env.AcceptQuest = function() error("addon must never accept a quest") end
     env.CompleteQuest = function() error("addon must never complete a quest") end
     env.GetQuestReward = function() error("addon must never claim a reward") end
+    if options.install then options.install(env, ns) end
     for line in io.lines("ZKIRPartyQuesting/ZKIRPartyQuesting.toc") do
         version = line:match("^## Version: (.+)$") or version
         if line:match("%.lua$") then
@@ -208,11 +213,15 @@ local function client(options)
     for _, f in ipairs(frames) do if f.scripts.OnEvent then driver = f; break end end
     assert(driver, "addon event driver missing")
     local function event(name, ...) driver.scripts.OnEvent(driver, name, ...) end
+    local function frame(delta)
+        clock = clock + delta
+        driver.scripts.OnUpdate(driver, delta)
+    end
     local function advance(n)
-        for _ = 1, n * 2 do clock = clock + 0.5; driver.scripts.OnUpdate(driver, 0.5) end
+        for _ = 1, n * 2 do frame(0.5) end
     end
     event("PLAYER_LOGIN")
-    return {env = env, ns = ns, event = event, advance = advance, frames = frames, messages = messages,
+    return {env = env, ns = ns, event = event, advance = advance, frame = frame, frames = frames, messages = messages,
         hooks = hooks, state = state, sounds = sounds, options = options,
         setQuest = function(id) questID = id end}
 end

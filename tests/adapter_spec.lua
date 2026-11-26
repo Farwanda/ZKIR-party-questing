@@ -185,15 +185,31 @@ test("synchronous submenus cannot be retired by the preceding selection posthook
         c.event("GOSSIP_SHOW"); c.advance(6)
         local core, key = c.ns.engine, c.ns.engine.active.key
         assert(core:confirm(core.me, "R"))
-        -- The game's native function can synchronously display its submenu
-        -- before hooksecurefunc invokes our callback.
-        choices = {{gossipOptionID = 202, orderIndex = 0}}
-        c.event("GOSSIP_SHOW")
-        c.hooks[method](method == "SelectOption" and 201 or 0)
+        c.options.selectGossip = function(calledMethod)
+            assert(calledMethod == method, "exercise the requested native selection path")
+            -- The native call displays its submenu before its secure post-hook.
+            choices = {{gossipOptionID = 202, orderIndex = 0}}
+            c.event("GOSSIP_SHOW")
+        end
+        c.env.C_GossipInfo[method](method == "SelectOption" and 201 or 0)
         assert(core.active.key ~= key and not core.active.started and not core.manual[core.me], method)
-        c.advance(1)
-        c.hooks[method](method == "SelectOption" and 202 or 0)
+        c.options.selectGossip = nil
+        c.frame(1 / 60) -- commit the displayed menu without running the half-second policy tick
+        c.env.C_GossipInfo[method](method == "SelectOption" and 202 or 0)
         assert(core.active.started, "the new menu's own later selection must retire it")
+    end
+end)
+test("expired and world-reset dialogue captures cannot retire an interaction", function()
+    for _, reset in ipairs({false, true}) do
+        local c = client({guid = "Creature-0-1-1-1-14354-0001"})
+        c.env.C_GossipInfo.GetOptions = function() return {{gossipOptionID = 203, orderIndex = 0}} end
+        c.event("GOSSIP_SHOW"); c.frame(1 / 60)
+        local core, key = c.ns.engine, c.ns.engine.active.key
+        if reset then c.event("PLAYER_ENTERING_WORLD")
+        else c.event("GOSSIP_CLOSED"); c.frame(1.01) end
+        c.env.C_GossipInfo.SelectOption(203)
+        assert(core.active.key == key and not core.active.started,
+            "selection requires a current capture or the native-close grace interval")
     end
 end)
 test("missing or restricted dialogue identities cannot manufacture a later stage", function()

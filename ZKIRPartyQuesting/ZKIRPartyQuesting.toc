@@ -13,4 +13,5 @@ Widgets.lua
 Settings.lua
 AutoLoot.lua
 UI.lua
+InteractionContext.lua
 WoW.lua
